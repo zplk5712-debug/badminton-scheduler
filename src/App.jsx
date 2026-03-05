@@ -3,22 +3,19 @@ import * as XLSX from "xlsx";
 import { toPng } from "html-to-image";
 
 /**
- * Badminton Scheduler - All-in-one App.jsx
- * Features: (1) Share, (5) Balanced play counts, (6) Fixed/Banned partners,
- * (8) Regeneration options, (9) Save/Load snapshots, (10) Court screen mode,
- * + Desktop responsive layout.
- *
- * Notes:
- * - This includes a heuristic/DFS matcher with your constraints:
- *   - forbid XD vs MD, forbid MD vs WD
- *   - allow XD vs WD only if (WD score - XD score) in [gapMin, gapMax]
- *   - max score difference <= MAX_DIFF
- *   - mixed-balance rule on weaker mixed team: maleScore >= femaleScore
- * - When constraints are too tight, it may fail to build a round; it will stop with a message.
+ * Badminton Scheduler v10 (No Snapshots)
+ * Included:
+ * (1) Share: link copy/share + schedule text copy
+ * (5) Balanced play counts: prioritize fewer gamesPlayed
+ * (6) Fixed/Banned partners: per player (name-based input)
+ * (8) Regeneration options: courts, maxDiff, mixedRatio guide, female priority, XD vs WD gap min/max
+ * (9) Save/Load: automatic persistence via localStorage (no snapshot UI)
+ * (10) Court screen mode
+ * + Desktop layout: 2-column on >=900px
+ * + Excel bulk import of players + template download
  */
 
-const STORAGE_KEY = "bm_scheduler_v10_state";
-const SNAP_KEY = "bm_scheduler_v10_snapshots";
+const STORAGE_KEY = "bm_scheduler_state_v10_nosnap";
 
 const GRADES = ["A", "B", "C", "D", "초심"];
 const MALE_POINTS = { A: 5, B: 4, C: 3, D: 2, 초심: 1 };
@@ -47,7 +44,8 @@ function saveJSON(key, value) {
   }
 }
 
-/** ---------- domain helpers ---------- */
+const normalizeName = (s) => String(s ?? "").trim();
+
 function baseScore(grade, genderMF) {
   const g = grade || "C";
   if (genderMF === "M") return MALE_POINTS[g] ?? 3;
@@ -93,18 +91,13 @@ function buildAllSplits(a, b, c, d) {
   ];
 }
 
-function normalizeName(s) {
-  return String(s ?? "").trim();
-}
-
-/** Partner constraints */
 function getNameToId(players) {
   const map = new Map();
   players.forEach((p) => map.set(normalizeName(p.name), p.id));
   return map;
 }
 
-function parseBannedNames(text) {
+function parseCommaNames(text) {
   return String(text ?? "")
     .split(",")
     .map((x) => normalizeName(x))
@@ -115,13 +108,11 @@ function violatesPartnerRules(team, fixedPartnerIdByPlayer, bannedPartnerIdsByPl
   if (!team || team.length !== 2) return true;
   const [p1, p2] = team;
 
-  // fixed partner: if p1 fixed partner exists, must be p2
   const fp1 = fixedPartnerIdByPlayer.get(p1.id);
   const fp2 = fixedPartnerIdByPlayer.get(p2.id);
   if (fp1 && fp1 !== p2.id) return true;
   if (fp2 && fp2 !== p1.id) return true;
 
-  // banned partner: if p2 is in p1 banned or vice versa
   const b1 = bannedPartnerIdsByPlayer.get(p1.id) || new Set();
   const b2 = bannedPartnerIdsByPlayer.get(p2.id) || new Set();
   if (b1.has(p2.id) || b2.has(p1.id)) return true;
@@ -129,7 +120,6 @@ function violatesPartnerRules(team, fixedPartnerIdByPlayer, bannedPartnerIdsByPl
   return false;
 }
 
-/** ---------- scheduling core ---------- */
 function pickBestMatchFromFour(four, opts, fixedPartnerIdByPlayer, bannedPartnerIdsByPlayer) {
   const [a, b, c, d] = four;
   let best = null;
@@ -169,13 +159,13 @@ function pickBestMatchFromFour(four, opts, fixedPartnerIdByPlayer, bannedPartner
     if (!validA || !validB) penalty += 2000;
     penalty += diff * 10;
 
-    // option: female doubles priority (prefer WD matches)
+    // female doubles priority: reward WD a bit
     if (opts.femaleDoublesPriority) {
       const wdCount = (typeA === "WD" ? 1 : 0) + (typeB === "WD" ? 1 : 0);
-      penalty -= wdCount * 4; // reward WD a bit
+      penalty -= wdCount * 4;
     }
 
-    // option: prefer mixed ratio (global target is handled at round-level, but we can slightly reward XD presence)
+    // mixed ratio guide: reward XD presence slightly if ratio >= 50
     if (opts.preferMixed) {
       const xdCount = (typeA === "XD" ? 1 : 0) + (typeB === "XD" ? 1 : 0);
       penalty -= xdCount * 2;
@@ -183,7 +173,7 @@ function pickBestMatchFromFour(four, opts, fixedPartnerIdByPlayer, bannedPartner
 
     if (penalty < bestPenalty) {
       bestPenalty = penalty;
-      best = { ...sp, scoreA, scoreB, diff, typeA, typeB, penalty };
+      best = { ...sp, scoreA, scoreB, diff, penalty };
     }
   }
 
@@ -197,10 +187,9 @@ function buildRoundByDFS(pool, opts, fixedPartnerIdByPlayer, bannedPartnerIdsByP
   const used = new Set();
   const matches = [];
 
-  // Balanced play count: players with fewer gamesPlayed first
+  // (5) balanced: fewer gamesPlayed first
   const ordered = [...pool].sort((x, y) => {
     if (x.gamesPlayed !== y.gamesPlayed) return x.gamesPlayed - y.gamesPlayed;
-    // slight randomness to explore
     return 0.5 - Math.random();
   });
 
@@ -236,7 +225,6 @@ function buildRoundByDFS(pool, opts, fixedPartnerIdByPlayer, bannedPartnerIdsByP
           if (best && best.penalty < 1000) {
             used.add(p4.id);
 
-            const matchType = `${teamType(best.teamA)}vs${teamType(best.teamB)}`;
             matches.push({
               courtId: courtIndex + 1,
               teamA: best.teamA,
@@ -244,7 +232,6 @@ function buildRoundByDFS(pool, opts, fixedPartnerIdByPlayer, bannedPartnerIdsByP
               scoreA: best.scoreA,
               scoreB: best.scoreB,
               diff: best.diff,
-              matchType,
             });
 
             if (dfs(courtIndex + 1)) return true;
@@ -274,7 +261,6 @@ function calcTargetRounds(players, courts) {
 }
 
 function scheduleToRounds(schedule) {
-  // schedule: [{id, matches:[{courtId, teamA, teamB,...}]}]
   return (schedule || []).map((r) => ({
     round: r.id,
     courts: (r.matches || []).map((m) => ({
@@ -290,7 +276,6 @@ function scheduleToRounds(schedule) {
   }));
 }
 
-/** ---------- UI helpers ---------- */
 function formatTypeLabel(t) {
   if (t === "MD") return "남복";
   if (t === "WD") return "여복";
@@ -304,42 +289,50 @@ function badgeColorByType(t) {
   return { bg: "rgba(124,92,255,0.12)", bd: "rgba(124,92,255,0.30)", tx: "rgba(124,92,255,0.98)" };
 }
 
-/** ---------- App ---------- */
+/** -------- Excel import helpers -------- */
+function normalizeGender(val) {
+  const v = String(val ?? "").trim();
+  if (!v) return null;
+  if (v === "남" || v.toLowerCase() === "m" || v === "M" || v.includes("남")) return "M";
+  if (v === "여" || v.toLowerCase() === "f" || v === "F" || v.includes("여")) return "F";
+  return null;
+}
+
+function normalizeGrade(val) {
+  const v = String(val ?? "").trim();
+  if (GRADES.includes(v)) return v;
+  if (v.toUpperCase() === "A") return "A";
+  if (v.toUpperCase() === "B") return "B";
+  if (v.toUpperCase() === "C") return "C";
+  if (v.toUpperCase() === "D") return "D";
+  if (v.includes("초") || v.toLowerCase().includes("begin")) return "초심";
+  return null;
+}
+
 export default function App() {
   const [tab, setTab] = useState("players"); // players | schedule | court
   const [isDesktop, setIsDesktop] = useState(false);
 
-  // core settings (8)
+  // (8) settings
   const [courts, setCourts] = useState(DEFAULT_COURTS);
   const [maxDiff, setMaxDiff] = useState(1.0);
-  const [mixedRatio, setMixedRatio] = useState(60); // 0~100, try to have XD matches
+  const [mixedRatio, setMixedRatio] = useState(60);
   const [femaleDoublesPriority, setFemaleDoublesPriority] = useState(true);
   const [mixedVsFemaleGapMin, setMixedVsFemaleGapMin] = useState(1);
   const [mixedVsFemaleGapMax, setMixedVsFemaleGapMax] = useState(2);
 
-  // players
-  const [players, setPlayers] = useState(() => {
-    const st = loadJSON(STORAGE_KEY, null);
-    if (st?.players && Array.isArray(st.players)) return st.players;
-    return [];
-  });
+  // players + schedule
+  const [players, setPlayers] = useState([]);
+  const [schedule, setSchedule] = useState([]);
 
-  // schedule
-  const [schedule, setSchedule] = useState(() => {
-    const st = loadJSON(STORAGE_KEY, null);
-    if (st?.schedule && Array.isArray(st.schedule)) return st.schedule;
-    return [];
-  });
-
-  // snapshots (9)
-  const [snapshots, setSnapshots] = useState(() => loadJSON(SNAP_KEY, []));
-  const [snapshotPick, setSnapshotPick] = useState("");
-
-  // court mode (10)
+  // (10) court mode
   const [courtRound, setCourtRound] = useState(1);
 
-  // share (1)
+  // share/export refs
   const scheduleRef = useRef(null);
+
+  // Excel upload ref
+  const fileInputRef = useRef(null);
 
   // player form
   const [inputs, setInputs] = useState({
@@ -358,10 +351,14 @@ export default function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // load persisted settings
+  // (9) load persisted state
   useEffect(() => {
     const st = loadJSON(STORAGE_KEY, null);
     if (!st) return;
+
+    if (Array.isArray(st.players)) setPlayers(st.players);
+    if (Array.isArray(st.schedule)) setSchedule(st.schedule);
+
     if (typeof st.courts === "number") setCourts(st.courts);
     if (typeof st.maxDiff === "number") setMaxDiff(st.maxDiff);
     if (typeof st.mixedRatio === "number") setMixedRatio(st.mixedRatio);
@@ -371,7 +368,7 @@ export default function App() {
     if (typeof st.courtRound === "number") setCourtRound(st.courtRound);
   }, []);
 
-  // persist state (9)
+  // (9) auto persist
   useEffect(() => {
     saveJSON(STORAGE_KEY, {
       players,
@@ -386,10 +383,6 @@ export default function App() {
     });
   }, [players, schedule, courts, maxDiff, mixedRatio, femaleDoublesPriority, mixedVsFemaleGapMin, mixedVsFemaleGapMax, courtRound]);
 
-  useEffect(() => {
-    saveJSON(SNAP_KEY, snapshots);
-  }, [snapshots]);
-
   const stats = useMemo(() => {
     const m = players.filter((p) => p.gender === "M").length;
     const f = players.filter((p) => p.gender === "F").length;
@@ -402,7 +395,29 @@ export default function App() {
     return [...players].sort((a, b) => (a.grade === b.grade ? a.name.localeCompare(b.name) : GRADES.indexOf(a.grade) - GRADES.indexOf(b.grade)));
   }, [players]);
 
-  /** ---------- Players CRUD + constraints fields ---------- */
+  // (6) partner maps
+  const partnerMaps = useMemo(() => {
+    const nameToId = getNameToId(players);
+
+    const fixed = new Map();
+    const banned = new Map();
+
+    players.forEach((p) => {
+      const fpName = normalizeName(p.fixedPartnerName);
+      if (fpName && nameToId.has(fpName)) fixed.set(p.id, nameToId.get(fpName));
+
+      const bannedNames = parseCommaNames(p.bannedPartnersText);
+      const set = new Set();
+      bannedNames.forEach((bn) => {
+        if (nameToId.has(bn)) set.add(nameToId.get(bn));
+      });
+      banned.set(p.id, set);
+    });
+
+    return { fixedPartnerIdByPlayer: fixed, bannedPartnerIdsByPlayer: banned };
+  }, [players]);
+
+  /** ---------- CRUD ---------- */
   function addPlayer() {
     const name = normalizeName(inputs.name);
     if (!name) return alert("이름을 입력하세요.");
@@ -423,9 +438,8 @@ export default function App() {
       grade: inputs.grade,
       maxGames: parsedMaxGames,
       customScore: parsedCustom,
-      // (6) partner constraints
-      fixedPartnerName: "", // store by name (simple for users)
-      bannedPartnersText: "", // comma-separated names
+      fixedPartnerName: "",
+      bannedPartnersText: "",
     };
 
     setPlayers((prev) => [...prev, newP]);
@@ -441,43 +455,122 @@ export default function App() {
   }
 
   function resetAllData() {
-    const ok = window.confirm("저장된 선수/대진표/설정/스냅샷까지 모두 초기화할까요?");
+    const ok = window.confirm("저장된 선수/대진표/설정 데이터를 모두 삭제할까요?");
     if (!ok) return;
     localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(SNAP_KEY);
     setPlayers([]);
     setSchedule([]);
-    setSnapshots([]);
-    setSnapshotPick("");
     setTab("players");
     setCourtRound(1);
   }
 
-  /** ---------- Build partner maps (6) ---------- */
-  const partnerMaps = useMemo(() => {
-    const nameToId = getNameToId(players);
+  /** ---------- Excel import ---------- */
+  function importPlayersFromExcelFile(file) {
+    const reader = new FileReader();
 
-    // fixedPartnerIdByPlayer: Map(playerId => partnerId)
-    const fixed = new Map();
-    // bannedPartnerIdsByPlayer: Map(playerId => Set(partnerIds))
-    const banned = new Map();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
 
-    players.forEach((p) => {
-      const fpName = normalizeName(p.fixedPartnerName);
-      if (fpName && nameToId.has(fpName)) fixed.set(p.id, nameToId.get(fpName));
+        if (!rows.length) {
+          alert("엑셀에 데이터가 없습니다.");
+          return;
+        }
 
-      const bannedNames = parseBannedNames(p.bannedPartnersText);
-      const set = new Set();
-      bannedNames.forEach((bn) => {
-        if (nameToId.has(bn)) set.add(nameToId.get(bn));
-      });
-      banned.set(p.id, set);
-    });
+        const existingNames = new Set(players.map((p) => normalizeName(p.name)));
 
-    return { fixedPartnerIdByPlayer: fixed, bannedPartnerIdsByPlayer: banned };
-  }, [players]);
+        let added = 0;
+        let skipped = 0;
+        const newOnes = [];
 
-  /** ---------- Schedule generation (5)(8) ---------- */
+        for (const row of rows) {
+          const name = normalizeName(row["이름"] ?? row["name"] ?? row["Name"]);
+          if (!name) {
+            skipped++;
+            continue;
+          }
+          if (existingNames.has(name)) {
+            skipped++;
+            continue;
+          }
+
+          const gender = normalizeGender(row["성별"] ?? row["gender"] ?? row["Gender"]) || "M";
+          const grade = normalizeGrade(row["급수"] ?? row["등급"] ?? row["grade"] ?? row["Grade"]) || "C";
+
+          const mgRaw = row["목표경기"] ?? row["maxGames"] ?? row["MaxGames"] ?? row["게임수"];
+          const maxGamesNum = Number(mgRaw);
+          const maxGames = Number.isFinite(maxGamesNum) ? clamp(maxGamesNum, 1, 20) : 3;
+
+          const csRaw = row["커스텀점수"] ?? row["customScore"] ?? row["CustomScore"];
+          const csNum = Number(csRaw);
+          const customScore = csRaw === "" || csRaw === null || csRaw === undefined ? null : Number.isFinite(csNum) ? csNum : null;
+
+          const fixedPartnerName = normalizeName(row["고정파트너"] ?? row["fixedPartner"] ?? row["FixedPartner"]) || "";
+          const bannedPartnersText = String(row["금지파트너"] ?? row["bannedPartners"] ?? row["BannedPartners"] ?? "").trim();
+
+          newOnes.push({
+            id: safeId(),
+            name,
+            gender,
+            grade,
+            maxGames,
+            customScore,
+            fixedPartnerName,
+            bannedPartnersText,
+          });
+
+          existingNames.add(name);
+          added++;
+        }
+
+        if (!newOnes.length) {
+          alert("추가할 선수가 없습니다. (이름이 비었거나 중복일 수 있어요)");
+          return;
+        }
+
+        setPlayers((prev) => [...prev, ...newOnes]);
+        alert(`엑셀 업로드 완료!\n추가: ${added}명\n건너뜀(빈값/중복): ${skipped}명`);
+      } catch (e) {
+        console.error(e);
+        alert("엑셀 읽기 실패: 파일 형식(.xlsx) 또는 컬럼명을 확인해주세요.");
+      }
+    };
+
+    reader.readAsArrayBuffer(file);
+  }
+
+  function handleExcelPick(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    importPlayersFromExcelFile(file);
+    e.target.value = "";
+  }
+
+  function downloadPlayerTemplateExcel() {
+    const template = [
+      {
+        이름: "홍길동",
+        성별: "남",
+        급수: "C",
+        목표경기: 3,
+        커스텀점수: "",
+        고정파트너: "",
+        금지파트너: "김철수,이영희",
+      },
+    ];
+
+    const ws = XLSX.utils.json_to_sheet(template);
+    ws["!cols"] = [{ wch: 12 }, { wch: 6 }, { wch: 6 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 22 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "선수템플릿");
+    XLSX.writeFile(wb, `선수명단_템플릿.xlsx`);
+  }
+
+  /** ---------- Schedule generation ---------- */
   function generateSchedule() {
     if (players.length < courts * 4) {
       alert(`인원이 부족합니다. ${courts}코트면 최소 ${courts * 4}명이 필요해요.`);
@@ -496,7 +589,6 @@ export default function App() {
     const MAX_TRY_PER_ROUND = 350;
     const CANDIDATE_POOL_SIZE = 24;
 
-    // working players
     let currentPlayers = players.map((p) => ({
       ...p,
       gamesPlayed: 0,
@@ -506,9 +598,6 @@ export default function App() {
     const roundsTarget = calcTargetRounds(players, courts);
     const roundsGoal = Math.max(1, roundsTarget);
 
-    // Rough round-level mixed ratio guidance:
-    // We'll just set opts.preferMixed based on mixedRatio and let scoring bias.
-    // (Strict global ratio requires more complex tracking; this keeps it stable and fast.)
     for (let r = 1; r <= roundsGoal; r++) {
       let roundMatches = null;
 
@@ -516,7 +605,6 @@ export default function App() {
         const candidatesAll = currentPlayers.filter((p) => p.gamesPlayed < (p.maxGames ?? 3));
         if (candidatesAll.length < courts * 4) break;
 
-        // Balanced play count: fewer gamesPlayed first
         const candidates = [...candidatesAll]
           .sort((a, b) => {
             if (a.gamesPlayed !== b.gamesPlayed) return a.gamesPlayed - b.gamesPlayed;
@@ -546,7 +634,6 @@ export default function App() {
         break;
       }
 
-      // update gamesPlayed
       roundMatches.forEach((m) => {
         [...m.teamA, ...m.teamB].forEach((p) => {
           const idx = currentPlayers.findIndex((cp) => cp.id === p.id);
@@ -562,10 +649,10 @@ export default function App() {
     setCourtRound(1);
   }
 
-  /** ---------- Export/Share (1) ---------- */
+  /** ---------- Share (1) ---------- */
   function scheduleAsText() {
     if (!schedule.length) return "대진표가 없습니다.";
-    let out = [];
+    const out = [];
     out.push(`🏸 배드민턴 대진표 (${schedule.length}R / ${courts}코트)`);
     out.push(`- 점수차 ≤ ${Number(maxDiff).toFixed(1)}`);
     out.push(`- 혼복비중(가이드): ${mixedRatio}%`);
@@ -589,7 +676,6 @@ export default function App() {
       await navigator.clipboard.writeText(text);
       alert("복사 완료!");
     } catch {
-      // fallback
       const ta = document.createElement("textarea");
       ta.value = text;
       document.body.appendChild(ta);
@@ -607,7 +693,7 @@ export default function App() {
         await navigator.share({ title: "배드민턴 대진표", url });
         return;
       } catch {
-        // ignore and fallback to copy
+        // fallback
       }
     }
     await copyText(url);
@@ -625,15 +711,12 @@ export default function App() {
       a.href = dataUrl;
       a.download = `대진표_${new Date().toISOString().slice(0, 10)}.png`;
       a.click();
-
-      // optional share
-      // (Android Chrome sometimes supports sharing files; keeping it simple: download only)
     } catch (e) {
       alert("이미지 저장 실패: " + (e?.message || "알 수 없는 오류"));
     }
   }
 
-  /** ---------- Excel ---------- */
+  /** ---------- Excel export schedule ---------- */
   function downloadExcel() {
     if (!schedule.length) return alert("생성된 대진표가 없습니다.");
 
@@ -671,62 +754,9 @@ export default function App() {
     XLSX.writeFile(wb, `배드민턴_대진표_${date}.xlsx`);
   }
 
-  /** ---------- Snapshots (9) ---------- */
-  function saveSnapshot() {
-    const name = prompt("저장 이름을 입력하세요 (예: 3/5 교류전)");
-    if (!name) return;
+  const roundsForCourtMode = useMemo(() => scheduleToRounds(schedule), [schedule]);
 
-    const snap = {
-      id: safeId(),
-      name,
-      savedAt: new Date().toISOString(),
-      state: {
-        players,
-        schedule,
-        courts,
-        maxDiff,
-        mixedRatio,
-        femaleDoublesPriority,
-        mixedVsFemaleGapMin,
-        mixedVsFemaleGapMax,
-        courtRound,
-      },
-    };
-    setSnapshots((prev) => [snap, ...prev].slice(0, 50));
-    alert("스냅샷 저장 완료!");
-  }
-
-  function loadSnapshot(id) {
-    const s = snapshots.find((x) => x.id === id);
-    if (!s) return;
-    const ok = confirm(`"${s.name}" 스냅샷을 불러올까요?\n(현재 내용은 덮어씁니다)`);
-    if (!ok) return;
-
-    const st = s.state;
-    if (Array.isArray(st.players)) setPlayers(st.players);
-    if (Array.isArray(st.schedule)) setSchedule(st.schedule);
-    if (typeof st.courts === "number") setCourts(st.courts);
-    if (typeof st.maxDiff === "number") setMaxDiff(st.maxDiff);
-    if (typeof st.mixedRatio === "number") setMixedRatio(st.mixedRatio);
-    if (typeof st.femaleDoublesPriority === "boolean") setFemaleDoublesPriority(st.femaleDoublesPriority);
-    if (typeof st.mixedVsFemaleGapMin === "number") setMixedVsFemaleGapMin(st.mixedVsFemaleGapMin);
-    if (typeof st.mixedVsFemaleGapMax === "number") setMixedVsFemaleGapMax(st.mixedVsFemaleGapMax);
-    if (typeof st.courtRound === "number") setCourtRound(st.courtRound);
-
-    setTab("players");
-    alert("불러오기 완료!");
-  }
-
-  function deleteSnapshot(id) {
-    const s = snapshots.find((x) => x.id === id);
-    if (!s) return;
-    const ok = confirm(`"${s.name}" 스냅샷을 삭제할까요?`);
-    if (!ok) return;
-    setSnapshots((prev) => prev.filter((x) => x.id !== id));
-    if (snapshotPick === id) setSnapshotPick("");
-  }
-
-  /** ---------- UI blocks ---------- */
+  /** ---------- UI ---------- */
   const playersUI = (
     <>
       <Card title="선수 등록" subtitle="이름/급수/성별/목표경기 + 파트너(고정/금지) 설정 가능">
@@ -743,6 +773,7 @@ export default function App() {
             <option value="F">여</option>
           </select>
         </div>
+
         <div className="grid3 mt10">
           <select className="in" value={inputs.grade} onChange={(e) => setInputs({ ...inputs, grade: e.target.value })}>
             {GRADES.map((g) => (
@@ -751,6 +782,7 @@ export default function App() {
               </option>
             ))}
           </select>
+
           <input
             className="in"
             type="number"
@@ -759,6 +791,7 @@ export default function App() {
             value={inputs.maxGames}
             onChange={(e) => setInputs({ ...inputs, maxGames: e.target.value })}
           />
+
           <input
             className="in"
             type="number"
@@ -776,6 +809,31 @@ export default function App() {
           <button className="btn ghost" onClick={generateSchedule}>
             🏆 대진표 생성
           </button>
+        </div>
+
+        {/* ✅ Excel bulk import (added back) */}
+        <div className="row mt10">
+          <button className="btn ghost" onClick={() => fileInputRef.current?.click()}>
+            📥 엑셀로 선수 업로드
+          </button>
+          <button className="btn ghost" onClick={downloadPlayerTemplateExcel}>
+            📄 템플릿 내려받기
+          </button>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            style={{ display: "none" }}
+            onChange={handleExcelPick}
+          />
+        </div>
+
+        <div className="hint mt10">
+          · 엑셀 첫 시트 사용 · 컬럼명: <b>이름, 성별, 급수, 목표경기, 커스텀점수, 고정파트너, 금지파트너</b>
+          <br />
+          · 성별은 남/여 또는 M/F 가능 · 급수는 A/B/C/D/초심
+          <br />· 같은 이름은 중복 추가하지 않음
         </div>
 
         <div className="hint mt10">
@@ -839,7 +897,7 @@ export default function App() {
 
         <div className="hint mt10">
           · 제약: ⛔ 혼복vs남복 / ⛔ 남복vs여복 / ✅ 혼복vs여복(여복-혼복 {mixedVsFemaleGapMin}~{mixedVsFemaleGapMax})
-          · 목표 라운드(자동): {targetRounds}R
+          <br />· 목표 라운드(자동): {targetRounds}R
         </div>
       </Card>
 
@@ -882,11 +940,7 @@ export default function App() {
                       </select>
                     </td>
                     <td>
-                      <select
-                        className="in mini"
-                        value={p.grade}
-                        onChange={(e) => updatePlayer(p.id, { grade: e.target.value })}
-                      >
+                      <select className="in mini" value={p.grade} onChange={(e) => updatePlayer(p.id, { grade: e.target.value })}>
                         {GRADES.map((g) => (
                           <option key={g} value={g}>
                             {g}
@@ -994,34 +1048,6 @@ export default function App() {
           </div>
         )}
       </Card>
-
-      <Card title="스냅샷 저장/불러오기" subtitle="(9) 현재 선수/설정/대진표를 통째로 저장">
-        <div className="row">
-          <button className="btn primary" onClick={saveSnapshot}>
-            💾 스냅샷 저장
-          </button>
-
-          <select className="in" value={snapshotPick} onChange={(e) => setSnapshotPick(e.target.value)} style={{ flex: 1 }}>
-            <option value="">(선택) 저장된 스냅샷</option>
-            {snapshots.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name} · {new Date(s.savedAt).toLocaleString()}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="row mt10">
-          <button className="btn ghost" disabled={!snapshotPick} onClick={() => loadSnapshot(snapshotPick)}>
-            불러오기
-          </button>
-          <button className="btn danger" disabled={!snapshotPick} onClick={() => deleteSnapshot(snapshotPick)}>
-            삭제
-          </button>
-        </div>
-
-        <div className="hint mt10">· 스냅샷은 브라우저(휴대폰)에 저장됩니다. 브라우저 데이터 삭제하면 사라질 수 있어요.</div>
-      </Card>
     </>
   );
 
@@ -1110,12 +1136,10 @@ export default function App() {
           </button>
         </div>
 
-        <div className="hint mt10">· 단톡방 공유는 “텍스트 복사”가 가장 빠릅니다. (붙여넣기만 하면 됨)</div>
+        <div className="hint mt10">· 단톡방 공유는 “텍스트 복사”가 제일 빠릅니다.</div>
       </Card>
     </>
   );
-
-  const roundsForCourtMode = useMemo(() => scheduleToRounds(schedule), [schedule]);
 
   const courtUI = (
     <>
@@ -1200,7 +1224,6 @@ export default function App() {
     </>
   );
 
-  /** ---------- Layout ---------- */
   const header = (
     <div className="topHeader">
       <div className="brandRow">
@@ -1239,19 +1262,7 @@ export default function App() {
           {isDesktop ? (
             <div className="desktopGrid">
               <div>{playersUI}</div>
-              <div>
-                {tab === "court" ? courtUI : scheduleUI}
-                <Card title="빠른 이동" subtitle="PC에서는 우측에서 대진표/코트모드를 확인하세요">
-                  <div className="row">
-                    <button className="btn ghost" onClick={() => setTab("schedule")}>
-                      🏆 대진표
-                    </button>
-                    <button className="btn primary" onClick={() => setTab("court")}>
-                      🎥 코트모드
-                    </button>
-                  </div>
-                </Card>
-              </div>
+              <div>{tab === "court" ? courtUI : scheduleUI}</div>
             </div>
           ) : (
             <>
@@ -1262,7 +1273,6 @@ export default function App() {
           )}
         </div>
 
-        {/* Mobile bottom bar */}
         {!isDesktop && (
           <div className="bottomBar">
             <button className="btn ghost" onClick={() => setTab("players")}>
@@ -1281,7 +1291,7 @@ export default function App() {
   );
 }
 
-/** ---------- small components ---------- */
+/** ---------- UI Components ---------- */
 function Card({ title, subtitle, right, children }) {
   return (
     <div className="card">
