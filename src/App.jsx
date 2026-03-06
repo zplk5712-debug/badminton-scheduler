@@ -1,50 +1,101 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
 /**
- * 배드민턴 밸런스 매치 - 모바일 중심 UI
- * 포함 기능:
- * 1) 선수정보 로컬 저장(localStorage) - 삭제 전까지 유지
- * 2) 엑셀(xlsx)로 선수 명단 일괄 업로드
- * 3) 코트 수 변경 가능
- * 4) 개인 목표 게임 수 변경 가능
- * 5) 라운드별(ROUND) 카드형 대진표 표시
- * 6) (중요) 이름 가로쓰기 고정(세로 깨짐 방지)
- *
- * 스냅샷(html-to-image) 기능은 제거됨
+ * 배드민턴 밸런스 매처 v10
+ * - 1파일 통합 버전
+ * - 모바일/PC 반응형
+ * - 선수 자동 저장(localStorage)
+ * - 엑셀 업로드
+ * - JSON 백업/복원
+ * - 코트 카드형 대진표
+ * - 라운드 아코디언
+ * - A4 가로 인쇄 모드
+ * - 상대/파트너 반복 최소화(약하게)
+ * - 부족자 우선 재생성 토글
  */
 
-// ===================== 유틸 / 기본값 =====================
-const STORAGE_KEY = "badminton_scheduler_players_v9";
-const SETTINGS_KEY = "badminton_scheduler_settings_v9";
+const STORAGE_KEY = "bm_scheduler_v10_allinone";
 
-// 급수 -> 기본 점수 (원하면 여기만 조정)
-const DEFAULT_SCORE_BY_GRADE = {
-  A: 5.0,
-  B: 4.0,
-  C: 3.0,
-  D: 2.0,
-  E: 1.0,
+const GRADES = ["A", "B", "C", "D", "초심"];
+const MALE_POINTS = { A: 5, B: 4, C: 3, D: 2, 초심: 1 };
+const FEMALE_POINTS = { A: 3.8, B: 2.5, C: 2.0, D: 1.5, 초심: 0.5 };
+
+const GRADE_COLOR = {
+  A: "#ef4444",
+  B: "#3b82f6",
+  C: "#22c55e",
+  D: "#f59e0b",
+  초심: "#9ca3af",
 };
 
-// 여성은 한 단계 아래로 본다: 점수 보정(단계/점수 방식 둘 중 택)
-// 여기서는 "점수 - 1.0" 보정(최소 1.0)
-function effectiveScore(player) {
-  const base =
-    player.customScore !== "" && player.customScore != null
-      ? Number(player.customScore)
-      : Number(player.baseScore ?? DEFAULT_SCORE_BY_GRADE[player.grade] ?? 3);
+const DEFAULT_TITLE = "배드민턴 대진표";
 
-  if (player.gender === "여") return Math.max(1.0, base - 1.0);
-  return base;
+const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+const normalize = (s) => String(s ?? "").trim();
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
-function uid() {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+function saveState(state) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // ignore
+  }
 }
 
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
+function gradeColor(grade) {
+  return GRADE_COLOR[grade] || "#9ca3af";
+}
+
+function getBaseScore(grade, gender) {
+  if (gender === "남") return MALE_POINTS[grade] ?? 3;
+  return FEMALE_POINTS[grade] ?? 2;
+}
+
+function isManualScore(player) {
+  return player.scoreOverride !== null && player.scoreOverride !== undefined && player.scoreOverride !== "";
+}
+
+function getAppliedScore(player) {
+  if (isManualScore(player)) return Number(player.scoreOverride);
+  return getBaseScore(player.grade, player.gender);
+}
+
+function getType(team) {
+  const maleCount = team.filter((p) => p.gender === "남").length;
+  if (maleCount === 2) return "남복";
+  if (maleCount === 1) return "혼복";
+  return "여복";
+}
+
+function isForbiddenMatch(typeA, typeB) {
+  const mixedVsMale = (typeA === "혼복" && typeB === "남복") || (typeA === "남복" && typeB === "혼복");
+  const maleVsFemale = (typeA === "남복" && typeB === "여복") || (typeA === "여복" && typeB === "남복");
+  return mixedVsMale || maleVsFemale;
+}
+
+function teamScore(team) {
+  return team.reduce((sum, p) => sum + getAppliedScore(p), 0);
+}
+
+function buildNameForSchedule(name) {
+  const text = String(name ?? "");
+  if (text.length >= 4) return `${text.slice(0, 2)}\n${text.slice(2)}`;
+  return text;
+}
+
+function playerNameShort(name) {
+  return String(name ?? "").slice(0, 5);
 }
 
 function formatScore(n) {
@@ -53,960 +104,1621 @@ function formatScore(n) {
   return x % 1 === 0 ? x.toFixed(0) : x.toFixed(1);
 }
 
-// ===================== 대진 생성(휴리스틱) =====================
-/**
- * 제약(최대한 유지):
- * - 기본: 2대2 복식만 생성
- * - 남복 vs 남복 / 여복 vs 여복 / 혼복(남+여 vs 남+여) 허용
- * - 혼복을 각 선수의 3게임 중 1~2경기 들어가도록 "가급적" 유도
- * - 밸런스: 팀 점수 합(유효점수) 차이를 줄이도록
- * - 한 라운드에 한 선수는 1번만 출전(중복 방지)
- *
- * ⚠️ 네가 예전에 만들었던 “더 강한 제약/특수 규칙”이 더 있다면
- * 그 규칙은 이 함수에 추가하면 됨(구조는 이미 맞춰놨어).
- */
-
-function makePairs(players, courts, preferMixed = true) {
-  // 현재 라운드에 쓸 후보 (아직 게임 남은 사람)
-  const candidates = players.filter((p) => p.played < p.targetGames);
-
-  // 라운드에서 코트 수 * 4명 필요
-  const need = courts * 4;
-  if (candidates.length < 4) return { matches: [], usedIds: new Set() };
-
-  // 라운드에 투입할 선수 뽑기:
-  // - 남은게임 많은 사람 우선
-  // - (preferMixed) 혼복 유도를 위해 남/여 균형도 고려
-  const sorted = [...candidates].sort((a, b) => {
-    const ra = (a.targetGames - a.played);
-    const rb = (b.targetGames - b.played);
-    if (rb !== ra) return rb - ra;
-    return effectiveScore(b) - effectiveScore(a);
+function getNameCounts(players) {
+  const map = new Map();
+  players.forEach((p) => {
+    const key = normalize(p.name);
+    map.set(key, (map.get(key) || 0) + 1);
   });
-
-  const picked = [];
-  const used = new Set();
-
-  // 성비 균형 잡기(혼복 유도)
-  const males = sorted.filter((p) => p.gender === "남");
-  const females = sorted.filter((p) => p.gender === "여");
-
-  if (preferMixed && males.length >= 2 && females.length >= 2) {
-    // 코트당 남2/여2가 이상적 → courts만큼 반복해서 채워보기
-    const needCourts = Math.min(courts, Math.floor(males.length / 2), Math.floor(females.length / 2));
-    for (let i = 0; i < needCourts; i++) {
-      for (let k = 0; k < 2; k++) {
-        const m = males.find((x) => !used.has(x.id));
-        if (m) { picked.push(m); used.add(m.id); }
-      }
-      for (let k = 0; k < 2; k++) {
-        const f = females.find((x) => !used.has(x.id));
-        if (f) { picked.push(f); used.add(f.id); }
-      }
-    }
-  }
-
-  // 부족하면 남은 사람으로 채우기
-  for (const p of sorted) {
-    if (picked.length >= need) break;
-    if (used.has(p.id)) continue;
-    picked.push(p);
-    used.add(p.id);
-  }
-
-  // 4명 단위로 매치 구성
-  const groupCount = Math.floor(picked.length / 4);
-  const groups = [];
-  for (let i = 0; i < groupCount; i++) {
-    groups.push(picked.slice(i * 4, i * 4 + 4));
-  }
-
-  // 그룹 내 팀 나누기(밸런스 최소화)
-  const matches = groups.map((g) => {
-    // 4명: a,b,c,d
-    const [a, b, c, d] = g;
-    const combos = [
-      { t1: [a, b], t2: [c, d] },
-      { t1: [a, c], t2: [b, d] },
-      { t1: [a, d], t2: [b, c] },
-    ];
-
-    // 허용되는 매치인지 체크 (혼복/동성복)
-    function isValidTeam(team) {
-      const genders = team.map((x) => x.gender);
-      const m = genders.filter((x) => x === "남").length;
-      const f = genders.filter((x) => x === "여").length;
-      // 2명 팀에서: 남2, 여2, 혼(1:1)만 허용
-      return (m === 2 && f === 0) || (m === 0 && f === 2) || (m === 1 && f === 1);
-    }
-    function isValidMatch(t1, t2) {
-      // 팀 자체가 유효해야 하고,
-      // 남+여(혼팀) vs 남+여(혼팀) 허용,
-      // 남복 vs 남복, 여복 vs 여복 허용,
-      // 남복 vs 여복은 피하기(요청 조건)
-      const t1m = t1.filter((x) => x.gender === "남").length;
-      const t2m = t2.filter((x) => x.gender === "남").length;
-      const t1type = t1m === 2 ? "남복" : t1m === 0 ? "여복" : "혼복";
-      const t2type = t2m === 2 ? "남복" : t2m === 0 ? "여복" : "혼복";
-      if (t1type === "남복" && t2type === "여복") return false;
-      if (t1type === "여복" && t2type === "남복") return false;
-      return true;
-    }
-
-    const valid = combos
-      .filter((c) => isValidTeam(c.t1) && isValidTeam(c.t2) && isValidMatch(c.t1, c.t2))
-      .map((c) => {
-        const s1 = c.t1.reduce((sum, p) => sum + effectiveScore(p), 0);
-        const s2 = c.t2.reduce((sum, p) => sum + effectiveScore(p), 0);
-        return { ...c, s1, s2, diff: Math.abs(s1 - s2) };
-      });
-
-    // 혹시 유효 조합이 하나도 없으면(극단 케이스), 그냥 diff 최소로
-    const pool = valid.length ? valid : combos.map((c) => {
-      const s1 = c.t1.reduce((sum, p) => sum + effectiveScore(p), 0);
-      const s2 = c.t2.reduce((sum, p) => sum + effectiveScore(p), 0);
-      return { ...c, s1, s2, diff: Math.abs(s1 - s2) };
-    });
-
-    pool.sort((x, y) => x.diff - y.diff);
-    return pool[0];
-  });
-
-  // 코트 수만큼 자르기
-  const finalMatches = matches.slice(0, courts);
-
-  const usedIds = new Set();
-  finalMatches.forEach((m) => {
-    m.t1.forEach((p) => usedIds.add(p.id));
-    m.t2.forEach((p) => usedIds.add(p.id));
-  });
-
-  return { matches: finalMatches, usedIds };
+  return map;
 }
 
-function generateRounds(players, courts) {
-  // 깊은 복사(played 업데이트용)
-  const list = players.map((p) => ({ ...p, played: p.played ?? 0 }));
+function getAssignedCounts(rounds) {
+  const map = new Map();
+  rounds.forEach((round) => {
+    round.matches.forEach((m) => {
+      [...m.teamAIds, ...m.teamBIds].forEach((id) => {
+        map.set(id, (map.get(id) || 0) + 1);
+      });
+    });
+  });
+  return map;
+}
 
+function getPlayerMap(players) {
+  const map = new Map();
+  players.forEach((p) => map.set(p.id, p));
+  return map;
+}
+
+function pairKey(a, b) {
+  return [a, b].sort().join("::");
+}
+
+function opponentPenalty(teamA, teamB, opponentHistory) {
+  let penalty = 0;
+  for (const a of teamA) {
+    for (const b of teamB) {
+      const count = opponentHistory.get(pairKey(a.id, b.id)) || 0;
+      if (count >= 1) penalty += 18 + count * 14;
+    }
+  }
+  return penalty;
+}
+
+function partnerPenalty(team, partnerHistory) {
+  const [a, b] = team;
+  const count = partnerHistory.get(pairKey(a.id, b.id)) || 0;
+  if (count >= 1) return 22 + count * 18;
+  return 0;
+}
+
+function weakerMixedRuleOK(team, isWeaker) {
+  if (!isWeaker) return true;
+  const male = team.find((p) => p.gender === "남");
+  const female = team.find((p) => p.gender === "여");
+  if (male && female) return getAppliedScore(male) >= getAppliedScore(female);
+  return true;
+}
+
+function buildAllSplits(a, b, c, d) {
+  return [
+    { teamA: [a, b], teamB: [c, d] },
+    { teamA: [a, c], teamB: [b, d] },
+    { teamA: [a, d], teamB: [b, c] },
+  ];
+}
+
+function evaluateFourPlayers(four, options, partnerHistory, opponentHistory) {
+  const [a, b, c, d] = four;
+  let best = null;
+  let bestPenalty = Infinity;
+
+  for (const split of buildAllSplits(a, b, c, d)) {
+    const typeA = getType(split.teamA);
+    const typeB = getType(split.teamB);
+
+    if (isForbiddenMatch(typeA, typeB)) continue;
+
+    const scoreA = teamScore(split.teamA);
+    const scoreB = teamScore(split.teamB);
+    const diff = Math.abs(scoreA - scoreB);
+    if (diff > options.maxDiff) continue;
+
+    // 혼복 vs 여복이면 gap 체크
+    const mixedVsFemale =
+      (typeA === "혼복" && typeB === "여복") || (typeA === "여복" && typeB === "혼복");
+
+    if (mixedVsFemale) {
+      const mixedScore = typeA === "혼복" ? scoreA : scoreB;
+      const femaleScore = typeA === "여복" ? scoreA : scoreB;
+      const gap = femaleScore - mixedScore;
+      if (gap < options.mixedVsFemaleGapMin || gap > options.mixedVsFemaleGapMax) continue;
+    }
+
+    const isTeamAWeaker = scoreA < scoreB;
+    const isTeamBWeaker = scoreB < scoreA;
+
+    const validA = scoreA === scoreB ? true : weakerMixedRuleOK(split.teamA, isTeamAWeaker);
+    const validB = scoreA === scoreB ? true : weakerMixedRuleOK(split.teamB, isTeamBWeaker);
+    if (!validA || !validB) continue;
+
+    const partnerP = partnerPenalty(split.teamA, partnerHistory) + partnerPenalty(split.teamB, partnerHistory);
+    const opponentP = opponentPenalty(split.teamA, split.teamB, opponentHistory);
+
+    let penalty = diff * 10 + partnerP + opponentP;
+
+    bestPenalty = penalty < bestPenalty ? penalty : bestPenalty;
+    if (penalty <= bestPenalty) {
+      best = {
+        ...split,
+        scoreA,
+        scoreB,
+        diff,
+        typeA,
+        typeB,
+        penalty,
+      };
+    }
+  }
+
+  return best;
+}
+
+function buildRoundGreedy(availablePlayers, courts, options, partnerHistory, opponentHistory) {
+  const targetMatchCount = Math.min(courts, Math.floor(availablePlayers.length / 4));
+  if (targetMatchCount <= 0) return [];
+
+  const unused = new Set(availablePlayers.map((p) => p.id));
+  const playerMap = new Map(availablePlayers.map((p) => [p.id, p]));
+  const matches = [];
+
+  for (let court = 1; court <= targetMatchCount; court++) {
+    const left = Array.from(unused).map((id) => playerMap.get(id));
+    if (left.length < 4) break;
+
+    let bestCandidate = null;
+
+    // 우선순위 높은 선수 몇 명을 anchor로
+    const anchors = left.slice(0, Math.min(left.length, 8));
+
+    for (const anchor of anchors) {
+      const others = left.filter((p) => p.id !== anchor.id).slice(0, 14);
+
+      for (let i = 0; i < others.length; i++) {
+        for (let j = i + 1; j < others.length; j++) {
+          for (let k = j + 1; k < others.length; k++) {
+            const four = [anchor, others[i], others[j], others[k]];
+            const evaluated = evaluateFourPlayers(four, options, partnerHistory, opponentHistory);
+            if (!evaluated) continue;
+
+            if (!bestCandidate || evaluated.penalty < bestCandidate.penalty) {
+              bestCandidate = { court, ...evaluated };
+            }
+          }
+        }
+      }
+    }
+
+    if (!bestCandidate) break;
+
+    matches.push(bestCandidate);
+    [...bestCandidate.teamA, ...bestCandidate.teamB].forEach((p) => unused.delete(p.id));
+  }
+
+  return matches;
+}
+
+function updateHistories(roundMatches, partnerHistory, opponentHistory) {
+  roundMatches.forEach((m) => {
+    const [a1, a2] = m.teamA;
+    const [b1, b2] = m.teamB;
+
+    const pA = pairKey(a1.id, a2.id);
+    const pB = pairKey(b1.id, b2.id);
+    partnerHistory.set(pA, (partnerHistory.get(pA) || 0) + 1);
+    partnerHistory.set(pB, (partnerHistory.get(pB) || 0) + 1);
+
+    for (const a of m.teamA) {
+      for (const b of m.teamB) {
+        const key = pairKey(a.id, b.id);
+        opponentHistory.set(key, (opponentHistory.get(key) || 0) + 1);
+      }
+    }
+  });
+}
+
+function generateSchedule(players, settings) {
+  const {
+    courts,
+    maxRounds,
+    shortagePriority,
+    maxDiff,
+    mixedVsFemaleGapMin,
+    mixedVsFemaleGapMax,
+    title,
+  } = settings;
+
+  const options = {
+    maxDiff,
+    mixedVsFemaleGapMin,
+    mixedVsFemaleGapMax,
+  };
+
+  const assigned = new Map(players.map((p) => [p.id, 0]));
+  const partnerHistory = new Map();
+  const opponentHistory = new Map();
   const rounds = [];
+
   let guard = 0;
+  while (guard < 200) {
+    guard += 1;
 
-  // 혼복 목표(1~2경기)를 "가급적" 맞추기 위해
-  // preferMixed를 초반 라운드에 더 강하게 적용
-  while (guard < 2000) {
-    guard++;
+    if (maxRounds && rounds.length >= maxRounds) break;
 
-    const still = list.filter((p) => p.played < p.targetGames);
-    if (still.length < 4) break;
+    let available = players.filter((p) => assigned.get(p.id) < p.targetGames);
+    if (available.length < 4) break;
 
-    // 혼복 유도: 남/여가 충분할 때는 true
-    const males = still.filter((p) => p.gender === "남").length;
-    const females = still.filter((p) => p.gender === "여").length;
-    const preferMixed = males >= 2 && females >= 2;
+    available = [...available].sort((a, b) => {
+      const remainA = a.targetGames - (assigned.get(a.id) || 0);
+      const remainB = b.targetGames - (assigned.get(b.id) || 0);
 
-    const { matches, usedIds } = makePairs(list, courts, preferMixed);
+      if (shortagePriority && remainA !== remainB) return remainB - remainA;
+      if (shortagePriority) {
+        if ((assigned.get(a.id) || 0) !== (assigned.get(b.id) || 0)) {
+          return (assigned.get(a.id) || 0) - (assigned.get(b.id) || 0);
+        }
+      }
+
+      const scoreDiff = getAppliedScore(b) - getAppliedScore(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      return a.name.localeCompare(b.name);
+    });
+
+    // 약간 랜덤성 추가
+    const head = available.slice(0, Math.min(18, available.length));
+    const tail = available.slice(Math.min(18, available.length));
+    head.sort(() => Math.random() - 0.5);
+    available = [...head, ...tail];
+
+    const matches = buildRoundGreedy(available, courts, options, partnerHistory, opponentHistory);
+
     if (!matches.length) break;
 
-    // 라운드 확정 -> played 증가
-    usedIds.forEach((id) => {
-      const p = list.find((x) => x.id === id);
-      if (p) p.played += 1;
+    matches.forEach((m) => {
+      [...m.teamA, ...m.teamB].forEach((p) => {
+        assigned.set(p.id, (assigned.get(p.id) || 0) + 1);
+      });
     });
+
+    updateHistories(matches, partnerHistory, opponentHistory);
 
     rounds.push({
       id: uid(),
-      matches: matches.map((m, idx) => ({
+      title: `ROUND ${rounds.length + 1}`,
+      matches: matches.map((m) => ({
         id: uid(),
-        court: idx + 1,
-        t1: m.t1.map((p) => p.id),
-        t2: m.t2.map((p) => p.id),
-        s1: m.s1,
-        s2: m.s2,
+        court: m.court,
+        teamAIds: m.teamA.map((p) => p.id),
+        teamBIds: m.teamB.map((p) => p.id),
+        scoreA: m.scoreA,
+        scoreB: m.scoreB,
         diff: m.diff,
+        typeA: m.typeA,
+        typeB: m.typeB,
       })),
     });
 
-    // 안전장치: 라운드가 너무 많아지면 중단
-    if (rounds.length > 80) break;
+    const remain = players.filter((p) => (assigned.get(p.id) || 0) < p.targetGames);
+    if (remain.length < 4) break;
   }
 
-  return { rounds, finalPlayers: list };
+  return {
+    title,
+    createdAt: new Date().toISOString(),
+    rounds,
+    assigned,
+  };
 }
 
-// ===================== 메인 컴포넌트 =====================
+function summaryRows(players, assignedMap) {
+  return players.map((p) => {
+    const assigned = assignedMap.get(p.id) || 0;
+    const diff = assigned - p.targetGames;
+    return {
+      ...p,
+      assigned,
+      diff,
+    };
+  });
+}
+
+function exportPlayersJson(players) {
+  const blob = new Blob([JSON.stringify(players, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `players_backup_${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function scheduleToExcel(rounds, playerMap, title) {
+  const rows = [];
+  rounds.forEach((round) => {
+    round.matches.forEach((m) => {
+      const teamA = m.teamAIds.map((id) => playerMap.get(id)?.name || "");
+      const teamB = m.teamBIds.map((id) => playerMap.get(id)?.name || "");
+      rows.push({
+        제목: title,
+        라운드: round.title,
+        코트: `${m.court}코트`,
+        타입: `${m.typeA} vs ${m.typeB}`,
+        "TEAM A-1": teamA[0] || "",
+        "TEAM A-2": teamA[1] || "",
+        "TEAM B-1": teamB[0] || "",
+        "TEAM B-2": teamB[1] || "",
+        "TEAM A 합": formatScore(m.scoreA),
+        "TEAM B 합": formatScore(m.scoreB),
+        "점수차 Δ": formatScore(m.diff),
+      });
+    });
+  });
+
+  const ws = XLSX.utils.json_to_sheet(rows);
+  ws["!cols"] = [
+    { wch: 20 },
+    { wch: 12 },
+    { wch: 10 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 10 },
+    { wch: 10 },
+    { wch: 10 },
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "대진표");
+  XLSX.writeFile(wb, `${title}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
+
 export default function App() {
-  const [players, setPlayers] = useState([]);
-  const [rounds, setRounds] = useState([]);
+  const initialState = loadState();
 
-  const [courts, setCourts] = useState(4);
+  const [title, setTitle] = useState(initialState?.title || DEFAULT_TITLE);
+  const [players, setPlayers] = useState(initialState?.players || []);
+  const [schedule, setSchedule] = useState(initialState?.schedule || null);
 
-  // 신규 등록 폼
-  const [newName, setNewName] = useState("");
-  const [newGender, setNewGender] = useState("남");
-  const [newGrade, setNewGrade] = useState("C");
-  const [newTargetGames, setNewTargetGames] = useState(3);
-  const [newCustomScore, setNewCustomScore] = useState("");
+  const [courts, setCourts] = useState(initialState?.courts || 4);
+  const [defaultTargetGames, setDefaultTargetGames] = useState(initialState?.defaultTargetGames || 3);
+  const [maxRoundsInput, setMaxRoundsInput] = useState(initialState?.maxRoundsInput || "");
+  const [shortagePriority, setShortagePriority] = useState(initialState?.shortagePriority || false);
 
-  // ===================== 로컬 저장/불러오기 =====================
+  const [maxDiff, setMaxDiff] = useState(initialState?.maxDiff || 1.0);
+  const [mixedVsFemaleGapMin, setMixedVsFemaleGapMin] = useState(initialState?.mixedVsFemaleGapMin || 1);
+  const [mixedVsFemaleGapMax, setMixedVsFemaleGapMax] = useState(initialState?.mixedVsFemaleGapMax || 2);
+
+  const [newPlayer, setNewPlayer] = useState({
+    name: "",
+    gender: "남",
+    grade: "C",
+    targetGames: 3,
+  });
+
+  const [expandedRounds, setExpandedRounds] = useState(() => {
+    if (initialState?.schedule?.rounds?.length) {
+      return initialState.schedule.rounds.map((r) => r.id);
+    }
+    return [];
+  });
+
+  const fileInputRef = useRef(null);
+  const jsonInputRef = useRef(null);
+
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      const rawSettings = localStorage.getItem(SETTINGS_KEY);
-      if (raw) setPlayers(JSON.parse(raw));
-      if (rawSettings) {
-        const s = JSON.parse(rawSettings);
-        if (s?.courts) setCourts(s.courts);
-      }
-    } catch {}
-  }, []);
+    saveState({
+      title,
+      players,
+      schedule,
+      courts,
+      defaultTargetGames,
+      maxRoundsInput,
+      shortagePriority,
+      maxDiff,
+      mixedVsFemaleGapMin,
+      mixedVsFemaleGapMax,
+    });
+  }, [
+    title,
+    players,
+    schedule,
+    courts,
+    defaultTargetGames,
+    maxRoundsInput,
+    shortagePriority,
+    maxDiff,
+    mixedVsFemaleGapMin,
+    mixedVsFemaleGapMax,
+  ]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(players));
-    } catch {}
-  }, [players]);
+  const assignedMap = useMemo(() => {
+    if (!schedule?.rounds?.length) return new Map();
+    return getAssignedCounts(schedule.rounds);
+  }, [schedule]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ courts }));
-    } catch {}
-  }, [courts]);
+  const playerMap = useMemo(() => getPlayerMap(players), [players]);
 
-  // ===================== 계산 =====================
-  const stats = useMemo(() => {
-    const total = players.length;
-    const male = players.filter((p) => p.gender === "남").length;
-    const female = players.filter((p) => p.gender === "여").length;
-    const remaining = players.reduce((sum, p) => sum + (p.targetGames - (p.played ?? 0)), 0);
-    return { total, male, female, remaining };
-  }, [players]);
+  const nameCountMap = useMemo(() => getNameCounts(players), [players]);
 
-  const playerById = useMemo(() => {
-    const m = new Map();
-    players.forEach((p) => m.set(p.id, p));
-    return m;
-  }, [players]);
+  const summary = useMemo(() => {
+    const rows = summaryRows(players, assignedMap).sort((a, b) => {
+      if (a.diff !== b.diff) return a.diff - b.diff;
+      return a.name.localeCompare(b.name);
+    });
+    return rows;
+  }, [players, assignedMap]);
 
-  // ===================== 액션 =====================
+  const shortageRows = useMemo(() => summary.filter((x) => x.diff < 0), [summary]);
+
   function addPlayer() {
-    const name = newName.trim();
+    const name = normalize(newPlayer.name);
     if (!name) return;
 
-    const base = DEFAULT_SCORE_BY_GRADE[newGrade] ?? 3;
-    const p = {
-      id: uid(),
-      name,
-      gender: newGender,
-      grade: newGrade,
-      baseScore: base,
-      customScore: newCustomScore === "" ? "" : Number(newCustomScore),
-      targetGames: clamp(Number(newTargetGames) || 3, 1, 10),
-      played: 0,
-    };
-    setPlayers((prev) => [p, ...prev]);
-    setNewName("");
-    setNewCustomScore("");
-  }
+    setPlayers((prev) => [
+      ...prev,
+      {
+        id: uid(),
+        name,
+        gender: newPlayer.gender,
+        grade: newPlayer.grade,
+        targetGames: clamp(Number(newPlayer.targetGames) || 3, 1, 30),
+        scoreOverride: null,
+      },
+    ]);
 
-  function removePlayer(id) {
-    setPlayers((prev) => prev.filter((p) => p.id !== id));
-  }
-
-  function clearAllPlayers() {
-    if (!confirm("선수 전체를 삭제할까요? (되돌릴 수 없음)")) return;
-    setPlayers([]);
-    setRounds([]);
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch {}
-  }
-
-  function resetPlayed() {
-    setPlayers((prev) => prev.map((p) => ({ ...p, played: 0 })));
-    setRounds([]);
+    setNewPlayer((prev) => ({ ...prev, name: "" }));
   }
 
   function updatePlayer(id, patch) {
     setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   }
 
-  function generate() {
-    // played는 현재값 반영해서 생성
-    const { rounds: r } = generateRounds(players, clamp(Number(courts) || 4, 1, 12));
-    setRounds(r);
+  function removePlayer(id) {
+    setPlayers((prev) => prev.filter((p) => p.id !== id));
+  }
 
-    // 생성 결과에 따라 played를 업데이트(라운드에 나온 횟수만큼)
-    const playedCount = new Map();
-    r.forEach((rd) => {
-      rd.matches.forEach((m) => {
-        [...m.t1, ...m.t2].forEach((pid) => {
-          playedCount.set(pid, (playedCount.get(pid) || 0) + 1);
-        });
-      });
-    });
+  function applyDefaultTargetToAll() {
+    const value = clamp(Number(defaultTargetGames) || 3, 1, 30);
+    setPlayers((prev) => prev.map((p) => ({ ...p, targetGames: value })));
+  }
 
+  function resetScoreToAuto(id) {
     setPlayers((prev) =>
-      prev.map((p) => ({
-        ...p,
-        played: clamp((p.played ?? 0) + (playedCount.get(p.id) || 0), 0, 999),
-      }))
+      prev.map((p) => (p.id === id ? { ...p, scoreOverride: null } : p))
     );
   }
 
-  // ===================== 엑셀 업로드 =====================
-  async function handleExcelUpload(file) {
-    if (!file) return;
-
-    const data = await file.arrayBuffer();
-    const wb = XLSX.read(data, { type: "array" });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-
-    /**
-     * 기대 컬럼(대소문자/공백 조금은 허용):
-     * - 이름 / name
-     * - 성별 / gender  (남/여)
-     * - 급수 / grade   (A~E)
-     * - 목표경기 / targetGames
-     * - 커스텀점수 / customScore (선택)
-     */
-    const norm = (s) => String(s).trim().toLowerCase();
-
-    const mapped = rows
-      .map((row) => {
-        const keys = Object.keys(row);
-        const pick = (aliases) => {
-          const k = keys.find((kk) => aliases.includes(norm(kk)));
-          return k ? row[k] : "";
-        };
-
-        const name = String(pick(["이름", "name"])).trim();
-        if (!name) return null;
-
-        const genderRaw = String(pick(["성별", "gender"])).trim();
-        const gender = genderRaw === "여" ? "여" : "남";
-
-        const gradeRaw = String(pick(["급수", "grade"])).trim().toUpperCase();
-        const grade = ["A", "B", "C", "D", "E"].includes(gradeRaw) ? gradeRaw : "C";
-
-        const tgRaw = pick(["목표경기", "targetgames", "target_games"]);
-        const targetGames = clamp(Number(tgRaw) || 3, 1, 10);
-
-        const csRaw = pick(["커스텀점수", "customscore", "custom_score"]);
-        const customScore = csRaw === "" ? "" : Number(csRaw);
-
-        const baseScore = DEFAULT_SCORE_BY_GRADE[grade] ?? 3;
-
-        return {
-          id: uid(),
-          name,
-          gender,
-          grade,
-          baseScore,
-          customScore: Number.isFinite(customScore) ? customScore : "",
-          targetGames,
-          played: 0,
-        };
-      })
-      .filter(Boolean);
-
-    if (!mapped.length) {
-      alert("엑셀에서 선수 데이터를 못 찾았어. 컬럼명이 맞는지 확인해줘!");
-      return;
-    }
-
-    // 기존 리스트에 합치기(이름 중복은 그대로 허용)
-    setPlayers((prev) => [...mapped, ...prev]);
+  function buildSchedule() {
+    const maxRounds = maxRoundsInput === "" ? null : clamp(Number(maxRoundsInput) || 1, 1, 999);
+    const result = generateSchedule(players, {
+      courts: clamp(Number(courts) || 4, 1, 10),
+      maxRounds,
+      shortagePriority,
+      maxDiff: Number(maxDiff) || 1.0,
+      mixedVsFemaleGapMin: Number(mixedVsFemaleGapMin) || 1,
+      mixedVsFemaleGapMax: Number(mixedVsFemaleGapMax) || 2,
+      title: title || DEFAULT_TITLE,
+    });
+    setSchedule(result);
+    setExpandedRounds(result.rounds.map((r) => r.id));
   }
 
-  // ===================== UI =====================
+  function clearAll() {
+    if (!window.confirm("선수/설정/대진표를 모두 삭제할까요?")) return;
+    setPlayers([]);
+    setSchedule(null);
+    setTitle(DEFAULT_TITLE);
+    setCourts(4);
+    setDefaultTargetGames(3);
+    setMaxRoundsInput("");
+    setShortagePriority(false);
+    setExpandedRounds([]);
+    localStorage.removeItem(STORAGE_KEY);
+  }
+
+  async function handleExcelUpload(file) {
+    if (!file) return;
+    try {
+      const data = await file.arrayBuffer();
+      const wb = XLSX.read(data, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+
+      const mapped = rows
+        .map((row) => {
+          const name = normalize(row["이름"] || row["name"] || row["Name"]);
+          if (!name) return null;
+
+          const gender = normalize(row["성별"] || row["gender"] || row["Gender"]) === "여" ? "여" : "남";
+          const gradeRaw = normalize(row["급수"] || row["grade"] || row["Grade"]);
+          const grade = GRADES.includes(gradeRaw) ? gradeRaw : "C";
+          const targetGames = clamp(
+            Number(row["목표경기"] || row["targetGames"] || row["TargetGames"] || 3),
+            1,
+            30
+          );
+          const appliedScore = row["적용점수"] || row["score"] || row["appliedScore"] || "";
+          const base = getBaseScore(grade, gender);
+          const scoreOverride =
+            appliedScore === "" || appliedScore === null || appliedScore === undefined
+              ? null
+              : Number(appliedScore) === base
+              ? null
+              : Number(appliedScore);
+
+          return {
+            id: uid(),
+            name,
+            gender,
+            grade,
+            targetGames,
+            scoreOverride: Number.isFinite(Number(scoreOverride)) ? Number(scoreOverride) : null,
+          };
+        })
+        .filter(Boolean);
+
+      setPlayers((prev) => [...prev, ...mapped]);
+    } catch {
+      alert("엑셀 파일을 읽지 못했어. 컬럼명을 확인해줘.");
+    }
+  }
+
+  async function handleJsonImport(file) {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const imported = JSON.parse(text);
+      if (!Array.isArray(imported)) {
+        alert("JSON 형식이 올바르지 않아.");
+        return;
+      }
+
+      const mode = window.prompt(
+        "불러오기 방식 입력:\n1 = 기존 유지 + 추가\n2 = 기존 전체 교체",
+        "1"
+      );
+
+      const clean = imported
+        .map((p) => ({
+          id: uid(),
+          name: normalize(p.name),
+          gender: p.gender === "여" ? "여" : "남",
+          grade: GRADES.includes(p.grade) ? p.grade : "C",
+          targetGames: clamp(Number(p.targetGames) || 3, 1, 30),
+          scoreOverride:
+            p.scoreOverride === null || p.scoreOverride === undefined || p.scoreOverride === ""
+              ? null
+              : Number(p.scoreOverride),
+        }))
+        .filter((p) => p.name);
+
+      if (mode === "2") {
+        setPlayers(clean);
+      } else {
+        setPlayers((prev) => [...prev, ...clean]);
+      }
+    } catch {
+      alert("JSON 파일을 읽지 못했어.");
+    }
+  }
+
+  function toggleRound(roundId) {
+    setExpandedRounds((prev) =>
+      prev.includes(roundId) ? prev.filter((x) => x !== roundId) : [...prev, roundId]
+    );
+  }
+
+  function expandAll() {
+    if (!schedule?.rounds) return;
+    setExpandedRounds(schedule.rounds.map((r) => r.id));
+  }
+
+  function collapseAll() {
+    setExpandedRounds([]);
+  }
+
+  function copyScheduleText() {
+    if (!schedule?.rounds?.length) return;
+    const lines = [];
+    lines.push(title || DEFAULT_TITLE);
+    lines.push(`${courts}코트 / ${schedule.rounds.length}라운드`);
+    lines.push("");
+
+    schedule.rounds.forEach((round) => {
+      lines.push(round.title);
+      round.matches.forEach((m) => {
+        const teamA = m.teamAIds.map((id) => playerMap.get(id)?.name || "").join(", ");
+        const teamB = m.teamBIds.map((id) => playerMap.get(id)?.name || "").join(", ");
+        lines.push(`${m.court}코트 | ${teamA}  VS  ${teamB} | ${formatScore(m.scoreA)}:${formatScore(m.scoreB)} Δ${formatScore(m.diff)}`);
+      });
+      lines.push("");
+    });
+
+    navigator.clipboard.writeText(lines.join("\n"));
+    alert("대진표 텍스트를 복사했어.");
+  }
+
+  function printSchedule() {
+    if (!schedule?.rounds?.length) return;
+    expandAll();
+    setTimeout(() => window.print(), 80);
+  }
+
+  const printMeta = useMemo(() => {
+    const date = new Date().toLocaleDateString("ko-KR").replace(/\./g, "-").replace(/\s/g, "");
+    return `${date} | ${courts}코트 | ${schedule?.rounds?.length || 0}라운드`;
+  }, [courts, schedule]);
+
   return (
-    <div style={styles.page}>
-      <div style={styles.header}>
-        <div style={styles.titleRow}>
-          <div style={styles.badge}>🏸</div>
-          <div>
-            <div style={styles.title}>배드민턴 밸런스 매치 v9</div>
-            <div style={styles.sub}>
-              코트 {courts}개 · 선수 {stats.total}명(남 {stats.male}, 여 {stats.female})
+    <div className="app">
+      <style>{css}</style>
+
+      <div className="shell">
+        {/* 헤더 */}
+        <header className="app-header no-print">
+          <div className="header-left">
+            <div className="app-icon">🏸</div>
+            <div>
+              <div className="app-title">배드민턴 밸런스 매처 v10</div>
+              <div className="app-sub">모바일/PC/출력용 통합 버전</div>
             </div>
           </div>
-        </div>
+        </header>
 
-        <div style={styles.settingsRow}>
-          <label style={styles.label}>
-            코트 수
-            <input
-              type="number"
-              value={courts}
-              onChange={(e) => setCourts(clamp(Number(e.target.value) || 4, 1, 12))}
-              style={styles.inputSmall}
-              min={1}
-              max={12}
-            />
-          </label>
+        {/* 설정 */}
+        <section className="panel no-print">
+          <div className="panel-title">설정</div>
 
-          <button style={styles.btnPrimary} onClick={generate}>
-            🎯 대진표 생성
-          </button>
-          <button style={styles.btnGhost} onClick={resetPlayed}>
-            ↺ 출전횟수 초기화
-          </button>
-          <button style={styles.btnDanger} onClick={clearAllPlayers}>
-            🗑️ 전체삭제
-          </button>
-        </div>
-      </div>
+          <div className="settings-grid">
+            <label className="field wide">
+              <span>대진표 제목</span>
+              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={DEFAULT_TITLE} />
+            </label>
 
-      <div style={styles.grid}>
-        {/* 선수 관리 */}
-        <section style={styles.card}>
-          <div style={styles.cardTitle}>👥 선수 등록 / 관리</div>
-
-          <div style={styles.excelRow}>
-            <label style={styles.fileBtn}>
-              📄 엑셀 업로드
+            <label className="field">
+              <span>코트 수</span>
               <input
-                type="file"
-                accept=".xlsx,.xls"
-                style={{ display: "none" }}
-                onChange={(e) => handleExcelUpload(e.target.files?.[0])}
+                type="number"
+                min={1}
+                max={10}
+                value={courts}
+                onChange={(e) => setCourts(clamp(Number(e.target.value) || 4, 1, 10))}
               />
             </label>
 
-            <div style={styles.hint}>
-              컬럼 예: <b>이름, 성별(남/여), 급수(A~E), 목표경기</b> (커스텀점수 선택)
+            <label className="field">
+              <span>기본 목표경기</span>
+              <input
+                type="number"
+                min={1}
+                max={30}
+                value={defaultTargetGames}
+                onChange={(e) => setDefaultTargetGames(clamp(Number(e.target.value) || 3, 1, 30))}
+              />
+            </label>
+
+            <div className="field btn-field">
+              <span>전원 적용</span>
+              <button onClick={applyDefaultTargetToAll}>전원 적용</button>
             </div>
+
+            <label className="field">
+              <span>최대 라운드(선택)</span>
+              <input
+                type="number"
+                min={1}
+                value={maxRoundsInput}
+                onChange={(e) => setMaxRoundsInput(e.target.value)}
+                placeholder="비우면 무제한"
+              />
+            </label>
+
+            <label className="field">
+              <span>점수차 최대(Δ)</span>
+              <input
+                type="number"
+                step="0.1"
+                value={maxDiff}
+                onChange={(e) => setMaxDiff(Number(e.target.value))}
+              />
+            </label>
+
+            <label className="field">
+              <span>혼복vs여복 gap 최소</span>
+              <input
+                type="number"
+                value={mixedVsFemaleGapMin}
+                onChange={(e) => setMixedVsFemaleGapMin(Number(e.target.value))}
+              />
+            </label>
+
+            <label className="field">
+              <span>혼복vs여복 gap 최대</span>
+              <input
+                type="number"
+                value={mixedVsFemaleGapMax}
+                onChange={(e) => setMixedVsFemaleGapMax(Number(e.target.value))}
+              />
+            </label>
+
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={shortagePriority}
+                onChange={(e) => setShortagePriority(e.target.checked)}
+              />
+              <span>부족자 우선 재생성</span>
+            </label>
           </div>
 
-          <div style={styles.formRow}>
-            <input
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="이름"
-              style={styles.input}
-            />
-            <select value={newGender} onChange={(e) => setNewGender(e.target.value)} style={styles.select}>
-              <option value="남">남</option>
-              <option value="여">여</option>
-            </select>
-            <select value={newGrade} onChange={(e) => setNewGrade(e.target.value)} style={styles.select}>
-              {["A", "B", "C", "D", "E"].map((g) => (
-                <option key={g} value={g}>
-                  {g}급
-                </option>
-              ))}
-            </select>
+          <div className="toolbar">
+            <button className="primary" onClick={buildSchedule}>대진표 생성</button>
+            <button onClick={() => fileInputRef.current?.click()}>엑셀 업로드</button>
+            <button onClick={() => exportPlayersJson(players)}>명단 백업(JSON)</button>
+            <button onClick={() => jsonInputRef.current?.click()}>명단 복원(JSON)</button>
+            <button className="danger" onClick={clearAll}>전체삭제</button>
 
             <input
-              type="number"
-              value={newTargetGames}
-              onChange={(e) => setNewTargetGames(clamp(Number(e.target.value) || 3, 1, 10))}
-              style={styles.inputSmall}
-              min={1}
-              max={10}
-              title="개인 목표 게임 수"
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls"
+              hidden
+              onChange={(e) => handleExcelUpload(e.target.files?.[0])}
             />
-
             <input
-              value={newCustomScore}
-              onChange={(e) => setNewCustomScore(e.target.value)}
-              placeholder="커스텀점수(선택)"
-              style={styles.inputSmallWide}
+              ref={jsonInputRef}
+              type="file"
+              accept=".json"
+              hidden
+              onChange={(e) => handleJsonImport(e.target.files?.[0])}
             />
-
-            <button style={styles.btnPrimary} onClick={addPlayer}>
-              ➕ 추가
-            </button>
-          </div>
-
-          <div style={styles.tableHead}>
-            <div style={{ ...styles.th, flex: 2 }}>이름(가로고정)</div>
-            <div style={{ ...styles.th, flex: 1 }}>성별</div>
-            <div style={{ ...styles.th, flex: 1 }}>급수</div>
-            <div style={{ ...styles.th, flex: 1 }}>커스텀</div>
-            <div style={{ ...styles.th, flex: 1 }}>적용점수</div>
-            <div style={{ ...styles.th, flex: 1 }}>목표</div>
-            <div style={{ ...styles.th, flex: 1 }}>출전</div>
-            <div style={{ ...styles.th, width: 60, textAlign: "right" }}>삭제</div>
-          </div>
-
-          <div style={styles.list}>
-            {players.map((p) => {
-              const eff = effectiveScore(p);
-              return (
-                <div key={p.id} style={styles.row}>
-                  {/* ✅ 이름 가로쓰기 고정(세로 깨짐 방지) */}
-                  <input
-                    value={p.name}
-                    onChange={(e) => updatePlayer(p.id, { name: e.target.value })}
-                    style={{ ...styles.nameInput, ...styles.noWrapText }}
-                  />
-
-                  <select
-                    value={p.gender}
-                    onChange={(e) => updatePlayer(p.id, { gender: e.target.value })}
-                    style={styles.select}
-                  >
-                    <option value="남">남</option>
-                    <option value="여">여</option>
-                  </select>
-
-                  <select
-                    value={p.grade}
-                    onChange={(e) => updatePlayer(p.id, { grade: e.target.value, baseScore: DEFAULT_SCORE_BY_GRADE[e.target.value] })}
-                    style={styles.select}
-                  >
-                    {["A", "B", "C", "D", "E"].map((g) => (
-                      <option key={g} value={g}>
-                        {g}
-                      </option>
-                    ))}
-                  </select>
-
-                  <input
-                    value={p.customScore ?? ""}
-                    onChange={(e) => updatePlayer(p.id, { customScore: e.target.value === "" ? "" : Number(e.target.value) })}
-                    style={styles.inputSmallWide}
-                    placeholder="(비움)"
-                  />
-
-                  <div style={styles.pill}>{formatScore(eff)}</div>
-
-                  <input
-                    type="number"
-                    value={p.targetGames}
-                    onChange={(e) => updatePlayer(p.id, { targetGames: clamp(Number(e.target.value) || 3, 1, 10) })}
-                    style={styles.inputSmall}
-                    min={1}
-                    max={10}
-                  />
-
-                  <div style={styles.pillDim}>{p.played ?? 0}</div>
-
-                  <button style={styles.iconBtn} onClick={() => removePlayer(p.id)} title="삭제">
-                    ✕
-                  </button>
-                </div>
-              );
-            })}
           </div>
         </section>
 
-        {/* 대진표 */}
-        <section style={styles.card}>
-          <div style={styles.cardTitle}>🏆 대진표 (라운드별)</div>
+        <div className="content-grid">
+          {/* 선수 관리 */}
+          <section className="panel no-print">
+            <div className="panel-title">선수 등록 / 관리</div>
 
-          {!rounds.length ? (
-            <div style={styles.empty}>
-              아직 생성된 대진표가 없어. <b>“대진표 생성”</b>을 눌러봐!
+            <div className="add-row">
+              <input
+                className="name-input"
+                value={newPlayer.name}
+                onChange={(e) => setNewPlayer((prev) => ({ ...prev, name: e.target.value }))}
+                placeholder="이름"
+              />
+              <select
+                value={newPlayer.gender}
+                onChange={(e) => setNewPlayer((prev) => ({ ...prev, gender: e.target.value }))}
+              >
+                <option value="남">남</option>
+                <option value="여">여</option>
+              </select>
+              <select
+                value={newPlayer.grade}
+                onChange={(e) => setNewPlayer((prev) => ({ ...prev, grade: e.target.value }))}
+              >
+                {GRADES.map((g) => (
+                  <option key={g} value={g}>{g}</option>
+                ))}
+              </select>
+              <input
+                type="number"
+                min={1}
+                max={30}
+                value={newPlayer.targetGames}
+                onChange={(e) => setNewPlayer((prev) => ({
+                  ...prev,
+                  targetGames: clamp(Number(e.target.value) || 3, 1, 30),
+                }))}
+              />
+              <button className="primary" onClick={addPlayer}>추가</button>
             </div>
-          ) : (
-            <div style={styles.rounds}>
-              {rounds.map((rd, rIdx) => (
-                <div key={rd.id} style={styles.roundBlock}>
-                  <div style={styles.roundTitle}>ROUND {rIdx + 1}</div>
 
-                  <div style={styles.matchGrid}>
-                    {rd.matches.map((m) => {
-                      const t1 = m.t1.map((id) => playerById.get(id)).filter(Boolean);
-                      const t2 = m.t2.map((id) => playerById.get(id)).filter(Boolean);
+            <div className="player-list">
+              {players.length === 0 && <div className="empty">선수가 아직 없어.</div>}
 
-                      const t1Type = teamType(t1);
-                      const t2Type = teamType(t2);
-                      const label = `${t1Type} vs ${t2Type}`;
+              {players.map((p) => {
+                const assigned = assignedMap.get(p.id) || 0;
+                const duplicateWarn = (nameCountMap.get(normalize(p.name)) || 0) > 1;
 
-                      return (
-                        <div key={m.id} style={styles.matchCard}>
-                          <div style={styles.matchTop}>
-                            <div style={styles.courtBadge}>{m.court}코트</div>
-                            <div style={styles.matchTag}>{label}</div>
-                            <div style={styles.diffPill}>Δ {formatScore(m.diff)}</div>
-                          </div>
+                return (
+                  <div className="player-card" key={p.id}>
+                    <div className="player-card-top">
+                      <div className="player-name-wrap">
+                        <input
+                          className="player-name"
+                          value={p.name}
+                          onChange={(e) => updatePlayer(p.id, { name: e.target.value })}
+                          title={p.name}
+                        />
+                        {duplicateWarn && <span className="dup-warn">⚠</span>}
+                      </div>
 
-                          <div style={styles.teams}>
-                            <TeamBox title="TEAM A" players={t1} sum={m.s1} />
-                            <div style={styles.vs}>VS</div>
-                            <TeamBox title="TEAM B" players={t2} sum={m.s2} />
-                          </div>
-                        </div>
-                      );
-                    })}
+                      <span
+                        className="grade-pill"
+                        style={{ backgroundColor: `${gradeColor(p.grade)}22`, color: gradeColor(p.grade), borderColor: `${gradeColor(p.grade)}66` }}
+                      >
+                        {p.gender} {p.grade}
+                      </span>
+
+                      <button className="icon danger" onClick={() => removePlayer(p.id)}>✕</button>
+                    </div>
+
+                    <div className="player-card-bottom">
+                      <div className="mini-field">
+                        <span>목</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={30}
+                          value={p.targetGames}
+                          onChange={(e) => updatePlayer(p.id, { targetGames: clamp(Number(e.target.value) || 3, 1, 30) })}
+                        />
+                      </div>
+
+                      <div className="mini-field score-field">
+                        <span>점</span>
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={isManualScore(p) ? p.scoreOverride : getAppliedScore(p)}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            updatePlayer(p.id, {
+                              scoreOverride: v === "" ? null : Number(v),
+                            });
+                          }}
+                        />
+                        <span className={`mode-badge ${isManualScore(p) ? "manual" : "auto"}`}>
+                          {isManualScore(p) ? "수동" : "자동"}
+                        </span>
+                        {isManualScore(p) && (
+                          <button className="icon tiny" onClick={() => resetScoreToAuto(p.id)}>↺</button>
+                        )}
+                      </div>
+
+                      <div className="mini-field readonly">
+                        <span>출</span>
+                        <div>{assigned}</div>
+                      </div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
-          )}
-        </section>
-      </div>
+          </section>
 
-      <footer style={styles.footer}>
-        <div style={styles.footerText}>
-          ✅ 선수정보는 <b>삭제하기 전까지 자동 저장</b>돼. (브라우저 localStorage)
-          <br />
-          ✅ 이름이 세로로 깨지면: 이 버전은 <b>이름 가로쓰기(줄바꿈 금지)</b>를 강제 적용했어.
+          {/* 대진표 */}
+          <section className="panel print-panel">
+            <div className="schedule-header no-print">
+              <div>
+                <div className="panel-title">대진표</div>
+                <div className="muted">
+                  {title || DEFAULT_TITLE} · {courts}코트 · {schedule?.rounds?.length || 0}라운드
+                </div>
+              </div>
+
+              <div className="toolbar compact">
+                <button onClick={expandAll}>모두 펼치기</button>
+                <button onClick={collapseAll}>모두 접기</button>
+                <button onClick={copyScheduleText}>텍스트 복사</button>
+                <button onClick={() => schedule?.rounds?.length && scheduleToExcel(schedule.rounds, playerMap, title || DEFAULT_TITLE)}>
+                  엑셀 저장
+                </button>
+                <button className="primary" onClick={printSchedule}>인쇄(A4 가로)</button>
+              </div>
+            </div>
+
+            {/* 인쇄용 헤더 */}
+            <div className="print-header print-only">
+              <div className="print-title">🏸 {title || DEFAULT_TITLE}</div>
+              <div className="print-sub">{printMeta}</div>
+            </div>
+
+            {/* 출전 현황 요약 */}
+            <div className="summary-box">
+              <div className="summary-title">출전 현황 요약</div>
+              <div className="summary-table-wrap">
+                <table className="summary-table">
+                  <thead>
+                    <tr>
+                      <th>이름</th>
+                      <th>목표</th>
+                      <th>배정</th>
+                      <th>차이</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summary.map((row) => (
+                      <tr key={row.id}>
+                        <td>
+                          <span className="name-cell">
+                            <span style={{ color: gradeColor(row.grade) }}>●</span> {playerNameShort(row.name)}
+                            {(nameCountMap.get(normalize(row.name)) || 0) > 1 && <span className="dup-warn-inline">⚠</span>}
+                          </span>
+                        </td>
+                        <td>{row.targetGames}</td>
+                        <td>{row.assigned}</td>
+                        <td>
+                          {row.diff === 0 && <span className="ok">✅ 0</span>}
+                          {row.diff === -1 && <span className="warn">⚠ -1</span>}
+                          {row.diff <= -2 && <span className="bad">❌ {row.diff}</span>}
+                          {row.diff > 0 && <span>+{row.diff}</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {shortageRows.length > 0 && (
+                <div className="shortage-hint">
+                  부족한 선수: {shortageRows.map((x) => playerNameShort(x.name)).join(", ")}
+                </div>
+              )}
+            </div>
+
+            {/* 라운드 아코디언 */}
+            {!schedule?.rounds?.length ? (
+              <div className="empty">대진표를 생성해줘.</div>
+            ) : (
+              <div className="round-list">
+                {schedule.rounds.map((round) => {
+                  const opened = expandedRounds.includes(round.id);
+                  return (
+                    <div className="round-accordion" key={round.id}>
+                      <button className="round-toggle" onClick={() => toggleRound(round.id)}>
+                        <span>{opened ? "▼" : "▶"} {round.title}</span>
+                        <span>{round.matches.length} matches</span>
+                      </button>
+
+                      {opened && (
+                        <div className="court-grid">
+                          {round.matches.map((m) => {
+                            const teamA = m.teamAIds.map((id) => playerMap.get(id)).filter(Boolean);
+                            const teamB = m.teamBIds.map((id) => playerMap.get(id)).filter(Boolean);
+
+                            return (
+                              <div className="court-card" key={m.id}>
+                                <div className="court-card-top">
+                                  <div className="court-no">{m.court}코트</div>
+                                  <div className="type-badge">{m.typeA} vs {m.typeB}</div>
+                                  <div className="diff-badge">Δ {formatScore(m.diff)}</div>
+                                </div>
+
+                                <div className="team-block">
+                                  <div className="team-label">TEAM A</div>
+                                  <div className="team-names">
+                                    {teamA.map((p) => (
+                                      <div className="name-row" key={p.id}>
+                                        <span
+                                          className="dot"
+                                          style={{ backgroundColor: gradeColor(p.grade) }}
+                                        />
+                                        <span className="schedule-name">{buildNameForSchedule(p.name)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <div className="score-big">TEAM A {formatScore(m.scoreA)}</div>
+                                </div>
+
+                                <div className="vs-center">VS</div>
+
+                                <div className="team-block">
+                                  <div className="team-label">TEAM B</div>
+                                  <div className="team-names">
+                                    {teamB.map((p) => (
+                                      <div className="name-row" key={p.id}>
+                                        <span
+                                          className="dot"
+                                          style={{ backgroundColor: gradeColor(p.grade) }}
+                                        />
+                                        <span className="schedule-name">{buildNameForSchedule(p.name)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <div className="score-big">TEAM B {formatScore(m.scoreB)}</div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="print-footer print-only">
+              Generated by Badminton Scheduler
+            </div>
+          </section>
         </div>
-      </footer>
-    </div>
-  );
-}
-
-// ===================== 서브 컴포넌트 =====================
-function teamType(team) {
-  const m = team.filter((p) => p.gender === "남").length;
-  const f = team.length - m;
-  if (m === 2) return "남복";
-  if (f === 2) return "여복";
-  return "혼복";
-}
-
-function TeamBox({ title, players, sum }) {
-  return (
-    <div style={styles.teamBox}>
-      <div style={styles.teamTitle}>{title}</div>
-
-      <div style={styles.teamList}>
-        {players.map((p) => (
-          <div key={p.id} style={styles.playerLine}>
-            {/* ✅ 이름 가로쓰기 고정 */}
-            <span style={{ ...styles.playerName, ...styles.noWrapText }}>
-              {p.name}
-            </span>
-
-            <span style={styles.playerMeta}>
-              {p.gender}/{p.grade}({formatScore(effectiveScore(p))})
-            </span>
-          </div>
-        ))}
       </div>
-
-      <div style={styles.teamSum}>합 {formatScore(sum)}</div>
     </div>
   );
 }
 
-// ===================== 스타일 =====================
-const styles = {
-  page: {
-    minHeight: "100vh",
-    background:
-      "radial-gradient(1200px 600px at 20% 10%, rgba(60,220,160,0.18), transparent 60%), radial-gradient(900px 500px at 80% 20%, rgba(110,80,255,0.15), transparent 55%), #0b1220",
-    color: "#eaf1ff",
-    padding: "16px",
-    fontFamily:
-      "system-ui, -apple-system, Segoe UI, Roboto, Apple SD Gothic Neo, Noto Sans KR, sans-serif",
-  },
-
-  header: {
-    maxWidth: 1200,
-    margin: "0 auto 14px auto",
-    padding: "14px",
-    borderRadius: 18,
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.10)",
-    boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
-    backdropFilter: "blur(10px)",
-  },
-  titleRow: { display: "flex", gap: 12, alignItems: "center" },
-  badge: {
-    width: 44,
-    height: 44,
-    display: "grid",
-    placeItems: "center",
-    borderRadius: 14,
-    background: "rgba(60,220,160,0.12)",
-    border: "1px solid rgba(60,220,160,0.22)",
-    fontSize: 20,
-  },
-  title: { fontSize: 26, fontWeight: 900, letterSpacing: -0.5 },
-  sub: { fontSize: 13, opacity: 0.8, marginTop: 3 },
-
-  settingsRow: {
-    marginTop: 12,
-    display: "flex",
-    flexWrap: "wrap",
-    gap: 10,
-    alignItems: "center",
-  },
-  label: { display: "flex", gap: 8, alignItems: "center", fontSize: 13, opacity: 0.9 },
-
-  grid: {
-    maxWidth: 1200,
-    margin: "0 auto",
-    display: "grid",
-    gridTemplateColumns: "1fr",
-    gap: 12,
-  },
-
-  card: {
-    borderRadius: 18,
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.10)",
-    boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
-    backdropFilter: "blur(10px)",
-    padding: 14,
-    overflow: "hidden",
-  },
-  cardTitle: { fontSize: 16, fontWeight: 800, marginBottom: 10, opacity: 0.95 },
-
-  excelRow: { display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 10 },
-  fileBtn: {
-    cursor: "pointer",
-    userSelect: "none",
-    padding: "10px 12px",
-    borderRadius: 12,
-    background: "rgba(80,140,255,0.14)",
-    border: "1px solid rgba(80,140,255,0.26)",
-    fontWeight: 800,
-    fontSize: 13,
-  },
-  hint: { fontSize: 12, opacity: 0.75, lineHeight: 1.35 },
-
-  formRow: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 },
-
-  input: {
-    flex: 1,
-    minWidth: 150,
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(0,0,0,0.18)",
-    color: "#eaf1ff",
-    outline: "none",
-  },
-  inputSmall: {
-    width: 82,
-    padding: "10px 10px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(0,0,0,0.18)",
-    color: "#eaf1ff",
-    outline: "none",
-  },
-  inputSmallWide: {
-    width: 140,
-    padding: "10px 10px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(0,0,0,0.18)",
-    color: "#eaf1ff",
-    outline: "none",
-  },
-  select: {
-    padding: "10px 10px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(0,0,0,0.18)",
-    color: "#eaf1ff",
-    outline: "none",
-  },
-
-  btnPrimary: {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(60,220,160,0.35)",
-    background: "rgba(60,220,160,0.16)",
-    color: "#eaf1ff",
-    fontWeight: 900,
-    cursor: "pointer",
-  },
-  btnGhost: {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.16)",
-    background: "rgba(255,255,255,0.06)",
-    color: "#eaf1ff",
-    fontWeight: 800,
-    cursor: "pointer",
-  },
-  btnDanger: {
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,90,110,0.35)",
-    background: "rgba(255,90,110,0.12)",
-    color: "#eaf1ff",
-    fontWeight: 900,
-    cursor: "pointer",
-  },
-
-  tableHead: {
-    display: "flex",
-    gap: 8,
-    padding: "8px 8px",
-    borderRadius: 12,
-    background: "rgba(255,255,255,0.05)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    fontSize: 12,
-    opacity: 0.8,
-    marginBottom: 8,
-  },
-  th: { flex: 1 },
-
-  list: { display: "flex", flexDirection: "column", gap: 8 },
-  row: {
-    display: "flex",
-    gap: 8,
-    alignItems: "center",
-    padding: "8px 8px",
-    borderRadius: 14,
-    background: "rgba(0,0,0,0.16)",
-    border: "1px solid rgba(255,255,255,0.08)",
-  },
-
-  // ✅ 이름 가로쓰기 핵심 스타일(줄바꿈 금지)
-  noWrapText: {
-    whiteSpace: "nowrap",
-    wordBreak: "keep-all",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    writingMode: "horizontal-tb",
-    textOrientation: "mixed",
-  },
-
-  nameInput: {
-    flex: 2,
-    minWidth: 140,
-    padding: "10px 12px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(0,0,0,0.18)",
-    color: "#eaf1ff",
-    outline: "none",
-  },
-
-  pill: {
-    width: 74,
-    textAlign: "center",
-    padding: "8px 10px",
-    borderRadius: 999,
-    background: "rgba(110,80,255,0.14)",
-    border: "1px solid rgba(110,80,255,0.25)",
-    fontWeight: 900,
-    fontSize: 13,
-  },
-  pillDim: {
-    width: 74,
-    textAlign: "center",
-    padding: "8px 10px",
-    borderRadius: 999,
-    background: "rgba(255,255,255,0.07)",
-    border: "1px solid rgba(255,255,255,0.12)",
-    fontWeight: 900,
-    fontSize: 13,
-    opacity: 0.9,
-  },
-  iconBtn: {
-    width: 44,
-    height: 40,
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "rgba(255,255,255,0.06)",
-    color: "#eaf1ff",
-    cursor: "pointer",
-    fontWeight: 900,
-  },
-
-  empty: { padding: 14, opacity: 0.75, lineHeight: 1.45 },
-
-  rounds: { display: "flex", flexDirection: "column", gap: 14 },
-  roundBlock: {
-    padding: 12,
-    borderRadius: 16,
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.08)",
-  },
-  roundTitle: { fontSize: 14, fontWeight: 900, letterSpacing: 1, opacity: 0.85, marginBottom: 10 },
-
-  matchGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(1, 1fr)",
-    gap: 10,
-  },
-
-  matchCard: {
-    borderRadius: 18,
-    padding: 12,
-    background: "linear-gradient(180deg, rgba(9,16,33,0.85), rgba(10,14,24,0.75))",
-    border: "1px solid rgba(255,255,255,0.10)",
-    boxShadow: "0 10px 24px rgba(0,0,0,0.35)",
-  },
-  matchTop: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 },
-  courtBadge: {
-    padding: "8px 10px",
-    borderRadius: 999,
-    background: "rgba(60,220,160,0.12)",
-    border: "1px solid rgba(60,220,160,0.26)",
-    fontWeight: 900,
-    fontSize: 12,
-  },
-  matchTag: { fontSize: 12, opacity: 0.8, flex: 1 },
-  diffPill: {
-    padding: "8px 10px",
-    borderRadius: 999,
-    background: "rgba(110,80,255,0.14)",
-    border: "1px solid rgba(110,80,255,0.25)",
-    fontWeight: 900,
-    fontSize: 12,
-  },
-
-  teams: { display: "grid", gridTemplateColumns: "1fr 60px 1fr", alignItems: "stretch", gap: 10 },
-  vs: {
-    display: "grid",
-    placeItems: "center",
-    fontWeight: 1000,
-    letterSpacing: 2,
-    opacity: 0.55,
-  },
-
-  teamBox: {
-    borderRadius: 16,
-    padding: 10,
-    background: "rgba(255,255,255,0.05)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    display: "flex",
-    flexDirection: "column",
-    gap: 8,
-    minWidth: 0,
-  },
-  teamTitle: { fontSize: 12, fontWeight: 900, opacity: 0.8 },
-  teamList: { display: "flex", flexDirection: "column", gap: 6 },
-  playerLine: {
-    display: "flex",
-    alignItems: "baseline",
-    justifyContent: "space-between",
-    gap: 8,
-    minWidth: 0,
-  },
-
-  // ✅ 이름 가로쓰기 + 줄바꿈 금지 + 너무 길면 ... 처리
-  playerName: {
-    fontSize: 16,
-    fontWeight: 950,
-    flex: 1,
-    minWidth: 0,
-  },
-  playerMeta: { fontSize: 12, opacity: 0.75, whiteSpace: "nowrap" },
-
-  teamSum: { marginTop: 6, fontSize: 12, opacity: 0.8, fontWeight: 900, textAlign: "right" },
-
-  footer: { maxWidth: 1200, margin: "14px auto 0 auto", opacity: 0.85 },
-  footerText: {
-    padding: 12,
-    borderRadius: 16,
-    background: "rgba(255,255,255,0.05)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    lineHeight: 1.5,
-    fontSize: 12,
-  },
-};
-
-// 반응형: 폭 넓으면 코트 카드 2열
-if (typeof window !== "undefined") {
-  const mq = window.matchMedia("(min-width: 860px)");
-  const apply = () => {
-    styles.grid.gridTemplateColumns = mq.matches ? "1fr 1.2fr" : "1fr";
-    styles.matchGrid.gridTemplateColumns = mq.matches ? "repeat(2, 1fr)" : "repeat(1, 1fr)";
-  };
-  apply();
-  mq.addEventListener?.("change", apply);
+const css = `
+:root{
+  --bg:#08111f;
+  --panel:#0f1b31;
+  --panel-2:#12213d;
+  --line:rgba(255,255,255,.10);
+  --text:#eaf1ff;
+  --muted:#9fb2d5;
+  --primary:#25c2a0;
+  --primary-2:#1952d8;
+  --danger:#ef4444;
+  --warn:#f59e0b;
 }
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:
+    radial-gradient(circle at top left, rgba(37,194,160,.10), transparent 25%),
+    radial-gradient(circle at top right, rgba(25,82,216,.12), transparent 20%),
+    var(--bg);
+  color:var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+button,input,select{
+  font:inherit;
+}
+.app{
+  min-height:100vh;
+}
+.shell{
+  max-width:1400px;
+  margin:0 auto;
+  padding:16px;
+}
+.app-header{
+  background:linear-gradient(135deg, rgba(37,194,160,.12), rgba(25,82,216,.10));
+  border:1px solid var(--line);
+  border-radius:18px;
+  padding:16px;
+  margin-bottom:14px;
+}
+.header-left{
+  display:flex;
+  align-items:center;
+  gap:12px;
+}
+.app-icon{
+  width:42px;
+  height:42px;
+  display:grid;
+  place-items:center;
+  border-radius:12px;
+  background:rgba(37,194,160,.15);
+  border:1px solid rgba(37,194,160,.25);
+}
+.app-title{
+  font-size:28px;
+  font-weight:900;
+  line-height:1.1;
+}
+.app-sub{
+  color:var(--muted);
+  margin-top:4px;
+  font-size:13px;
+}
+
+.panel{
+  background:rgba(15,27,49,.92);
+  border:1px solid var(--line);
+  border-radius:18px;
+  padding:14px;
+  box-shadow:0 20px 50px rgba(0,0,0,.18);
+}
+.panel-title{
+  font-weight:900;
+  font-size:18px;
+  margin-bottom:10px;
+}
+.muted{
+  color:var(--muted);
+  font-size:13px;
+}
+
+.settings-grid{
+  display:grid;
+  grid-template-columns:repeat(4, minmax(0, 1fr));
+  gap:10px;
+}
+.field{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.field.wide{
+  grid-column:span 2;
+}
+.field span{
+  font-size:12px;
+  color:var(--muted);
+}
+.field input, .field select{
+  width:100%;
+  border:1px solid var(--line);
+  background:#091526;
+  color:var(--text);
+  border-radius:12px;
+  padding:10px 12px;
+}
+.btn-field button{
+  height:42px;
+}
+.toggle{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  border:1px solid var(--line);
+  background:#091526;
+  border-radius:12px;
+  padding:10px 12px;
+  min-height:42px;
+  margin-top:19px;
+}
+.toolbar{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:12px;
+}
+.toolbar.compact{
+  margin-top:0;
+}
+.toolbar button{
+  border:1px solid var(--line);
+  background:#0a1830;
+  color:var(--text);
+  padding:10px 12px;
+  border-radius:12px;
+  cursor:pointer;
+}
+.toolbar button.primary,
+.add-row button.primary{
+  background:linear-gradient(135deg, rgba(37,194,160,.20), rgba(25,82,216,.18));
+  border-color:rgba(37,194,160,.35);
+}
+.toolbar button.danger{
+  border-color:rgba(239,68,68,.35);
+  background:rgba(239,68,68,.10);
+}
+
+.content-grid{
+  display:grid;
+  grid-template-columns:420px 1fr;
+  gap:14px;
+  margin-top:14px;
+}
+
+.add-row{
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) 70px 80px 80px 80px;
+  gap:8px;
+  margin-bottom:12px;
+}
+.add-row input, .add-row select, .add-row button{
+  border:1px solid var(--line);
+  background:#091526;
+  color:var(--text);
+  border-radius:12px;
+  padding:10px 12px;
+}
+.name-input{
+  min-width:0;
+}
+
+.player-list{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+.player-card{
+  border:1px solid var(--line);
+  background:#0b172b;
+  border-radius:14px;
+  padding:10px;
+}
+.player-card-top,
+.player-card-bottom{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.player-card-bottom{
+  margin-top:8px;
+  flex-wrap:wrap;
+}
+.player-name-wrap{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  min-width:0;
+  flex:1;
+}
+.player-name{
+  width:6ch;
+  max-width:6ch;
+  min-width:6ch;
+  border:1px solid var(--line);
+  background:#091526;
+  color:var(--text);
+  border-radius:10px;
+  padding:8px 10px;
+  overflow:hidden;
+  white-space:nowrap;
+}
+.dup-warn{
+  color:#fbbf24;
+  font-weight:900;
+}
+.dup-warn-inline{
+  color:#fbbf24;
+  margin-left:4px;
+}
+.grade-pill{
+  border:1px solid;
+  padding:7px 10px;
+  border-radius:999px;
+  font-weight:800;
+  white-space:nowrap;
+  font-size:12px;
+}
+.icon{
+  border:1px solid var(--line);
+  background:#091526;
+  color:var(--text);
+  border-radius:10px;
+  padding:7px 10px;
+  cursor:pointer;
+}
+.icon.danger{
+  border-color:rgba(239,68,68,.35);
+  background:rgba(239,68,68,.10);
+}
+.icon.tiny{
+  padding:5px 8px;
+  font-size:12px;
+}
+.mini-field{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  min-width:0;
+}
+.mini-field > span{
+  color:var(--muted);
+  font-size:12px;
+  min-width:16px;
+}
+.mini-field input{
+  width:3.5ch;
+  min-width:3.5ch;
+  max-width:5.5ch;
+  border:1px solid var(--line);
+  background:#091526;
+  color:var(--text);
+  border-radius:10px;
+  padding:7px 8px;
+  text-align:center;
+}
+.mini-field.readonly div{
+  min-width:28px;
+  padding:7px 8px;
+  border-radius:10px;
+  background:#091526;
+  border:1px solid var(--line);
+  text-align:center;
+}
+.score-field input{
+  width:5.5ch;
+}
+.mode-badge{
+  font-size:11px;
+  padding:5px 7px;
+  border-radius:999px;
+  font-weight:800;
+  white-space:nowrap;
+}
+.mode-badge.auto{
+  background:rgba(37,194,160,.12);
+  color:#7ee4cf;
+}
+.mode-badge.manual{
+  background:rgba(245,158,11,.14);
+  color:#fbbf24;
+}
+
+.schedule-header{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:10px;
+}
+.summary-box{
+  border:1px solid var(--line);
+  background:#0b172b;
+  border-radius:14px;
+  padding:12px;
+  margin-bottom:12px;
+}
+.summary-title{
+  font-weight:800;
+  margin-bottom:8px;
+}
+.summary-table-wrap{
+  overflow:auto;
+}
+.summary-table{
+  width:100%;
+  border-collapse:collapse;
+  min-width:380px;
+}
+.summary-table th,
+.summary-table td{
+  padding:8px 10px;
+  border-bottom:1px solid rgba(255,255,255,.06);
+  text-align:left;
+  font-size:13px;
+}
+.summary-table th{
+  color:var(--muted);
+}
+.ok{color:#86efac;font-weight:800}
+.warn{color:#fbbf24;font-weight:800}
+.bad{color:#f87171;font-weight:800}
+.shortage-hint{
+  margin-top:8px;
+  color:var(--muted);
+  font-size:12px;
+}
+
+.round-list{
+  display:flex;
+  flex-direction:column;
+  gap:12px;
+}
+.round-accordion{
+  border:1px solid var(--line);
+  background:#0b172b;
+  border-radius:16px;
+  overflow:hidden;
+}
+.round-toggle{
+  width:100%;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+  background:linear-gradient(90deg, rgba(37,194,160,.10), rgba(25,82,216,.08));
+  color:var(--text);
+  border:none;
+  cursor:pointer;
+  padding:12px 14px;
+  font-weight:900;
+}
+.court-grid{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:12px;
+  padding:12px;
+}
+.court-card{
+  border:1px solid var(--line);
+  background:
+    radial-gradient(circle at top left, rgba(25,82,216,.16), transparent 30%),
+    #091526;
+  border-radius:16px;
+  padding:12px;
+  page-break-inside:avoid;
+  break-inside:avoid;
+}
+.court-card-top{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  margin-bottom:10px;
+  flex-wrap:wrap;
+}
+.court-no{
+  background:rgba(37,194,160,.14);
+  border:1px solid rgba(37,194,160,.35);
+  color:#7ee4cf;
+  padding:6px 10px;
+  border-radius:999px;
+  font-weight:900;
+}
+.type-badge{
+  color:var(--muted);
+  font-size:12px;
+}
+.diff-badge{
+  margin-left:auto;
+  background:rgba(109,40,217,.18);
+  border:1px solid rgba(109,40,217,.35);
+  color:#c4b5fd;
+  padding:6px 10px;
+  border-radius:999px;
+  font-weight:900;
+}
+.team-block{
+  border:1px solid var(--line);
+  background:rgba(255,255,255,.03);
+  border-radius:14px;
+  padding:10px;
+}
+.team-label{
+  font-size:12px;
+  color:var(--muted);
+  font-weight:900;
+  margin-bottom:6px;
+}
+.team-names{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.name-row{
+  display:flex;
+  align-items:flex-start;
+  gap:8px;
+}
+.dot{
+  width:10px;
+  height:10px;
+  border-radius:999px;
+  margin-top:4px;
+  flex:0 0 auto;
+}
+.schedule-name{
+  white-space:pre-line;
+  line-height:1.15;
+  font-weight:900;
+  font-size:18px;
+}
+.vs-center{
+  text-align:center;
+  font-weight:900;
+  letter-spacing:1px;
+  margin:10px 0;
+  color:var(--muted);
+}
+.score-big{
+  margin-top:10px;
+  font-size:20px;
+  font-weight:900;
+  color:#f8fafc;
+}
+
+.empty{
+  padding:20px;
+  text-align:center;
+  color:var(--muted);
+}
+
+.print-header,
+.print-footer{
+  display:none;
+}
+.name-cell{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+}
+
+@media (max-width: 960px){
+  .settings-grid{
+    grid-template-columns:1fr 1fr;
+  }
+  .field.wide{
+    grid-column:span 2;
+  }
+  .content-grid{
+    grid-template-columns:1fr;
+  }
+  .schedule-header{
+    flex-direction:column;
+  }
+}
+
+@media (min-width: 961px){
+  .court-grid{
+    grid-template-columns:1fr 1fr;
+  }
+}
+
+@page{
+  size:A4 landscape;
+  margin:10mm;
+}
+
+@media print{
+  body{
+    background:white !important;
+    color:#0f172a !important;
+  }
+  .no-print{
+    display:none !important;
+  }
+  .shell{
+    max-width:none;
+    padding:0;
+    margin:0;
+  }
+  .print-panel{
+    border:none !important;
+    box-shadow:none !important;
+    background:white !important;
+    padding:0 !important;
+  }
+  .print-header{
+    display:block;
+    margin-bottom:10px;
+    border-bottom:2px solid #0f3f6b;
+    padding-bottom:8px;
+  }
+  .print-title{
+    font-size:24px;
+    font-weight:900;
+    color:#0f3f6b;
+  }
+  .print-sub{
+    margin-top:6px;
+    color:#475569;
+    font-size:12px;
+  }
+  .summary-box{
+    background:white !important;
+    color:#0f172a !important;
+    border:1px solid #cbd5e1 !important;
+    box-shadow:none !important;
+  }
+  .summary-table th,
+  .summary-table td{
+    color:#0f172a !important;
+    border-bottom:1px solid #e2e8f0 !important;
+  }
+  .round-accordion{
+    border:none !important;
+    background:white !important;
+    margin-bottom:10px;
+    break-inside:auto;
+  }
+  .round-toggle{
+    background:none !important;
+    color:#0f3f6b !important;
+    border-top:1px solid #cbd5e1;
+    border-bottom:1px solid #cbd5e1;
+    padding:8px 0 !important;
+  }
+  .court-grid{
+    grid-template-columns:1fr 1fr !important;
+    gap:8px !important;
+    padding:8px 0 !important;
+  }
+  .court-card{
+    background:white !important;
+    color:#0f172a !important;
+    border:1px solid #cbd5e1 !important;
+    box-shadow:none !important;
+  }
+  .court-no{
+    background:#0f3f6b !important;
+    color:white !important;
+    border:1px solid #0f3f6b !important;
+  }
+  .type-badge{
+    color:#475569 !important;
+  }
+  .diff-badge{
+    background:#f1f5f9 !important;
+    color:#334155 !important;
+    border:1px solid #cbd5e1 !important;
+  }
+  .team-block{
+    border:1px solid #dbeafe !important;
+    background:#f8fafc !important;
+  }
+  .team-label{
+    color:#475569 !important;
+  }
+  .schedule-name{
+    color:#0f172a !important;
+    font-size:15px !important;
+  }
+  .vs-center{
+    color:#334155 !important;
+  }
+  .score-big{
+    color:#0f172a !important;
+    font-size:18px !important;
+  }
+  .print-footer{
+    display:block;
+    margin-top:10px;
+    text-align:right;
+    color:#64748b;
+    font-size:11px;
+  }
+}
+`;
