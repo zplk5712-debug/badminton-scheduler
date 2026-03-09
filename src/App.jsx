@@ -1,2118 +1,1737 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
-import PptxGenJS from "pptxgenjs";
+import { toPng } from "html-to-image";
 
-const STORAGE_KEY = "badminton_scheduler_v14_full";
-const DEFAULT_TITLE = "배드민턴 대진표";
 const GRADES = ["A", "B", "C", "D", "초심"];
+const GENDERS = ["남", "여"];
+const MODES = [
+  { value: "friendly", label: "친선전", icon: "🏸", accent: "blue" },
+  { value: "tournament", label: "대회", icon: "🏆", accent: "purple" },
+  { value: "rivalry", label: "대항전", icon: "⚔️", accent: "orange" },
+];
+const TEAMS = ["홈팀", "원정팀"];
+
+const STORAGE_KEY_PLAYERS = "badmonkeyz_scheduler_v10_players";
+const STORAGE_KEY_MODE = "badmonkeyz_scheduler_v10_mode";
+const STORAGE_KEY_HOME = "badmonkeyz_scheduler_v10_home";
 
 const MALE_POINTS = { A: 5, B: 4, C: 3, D: 2, 초심: 1 };
 const FEMALE_POINTS = { A: 3.8, B: 2.5, C: 2.0, D: 1.5, 초심: 0.5 };
 
-const GRADE_COLORS = {
-  A: "#ef4444",
-  B: "#3b82f6",
-  C: "#22c55e",
-  D: "#f59e0b",
-  초심: "#9ca3af",
+const TOTAL_COURTS = 4;
+const MAX_GAMES = 20;
+const DEFAULT_MAX_GAMES = 3;
+const MAX_DIFF_SAME_TYPE = 1.0;
+const MAX_TOTAL_ROUNDS_SOFT = 60;
+const MAX_ROUND_TRIES = 220;
+
+const CROSS_TYPE_RULES = {
+  HON_YEO: { minGap: 1.0, stronger: "YEO" },
+  HON_NAM: { minGap: 1.5, stronger: "HON" },
+  NAM_YEO: { minGap: 2.0, stronger: "YEO" },
 };
 
-const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
-const uid = () => `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-const normalize = (s) => String(s ?? "").trim();
+const EVENT_DEFAULTS_BY_GENDER = {
+  남: { nam: true, yeo: false, hon: false },
+  여: { nam: false, yeo: true, hon: false },
+};
 
-function makeTimestamp() {
-  const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mi = String(d.getMinutes()).padStart(2, "0");
-  const ss = String(d.getSeconds()).padStart(2, "0");
-  return `${yyyy}${mm}${dd}_${hh}${mi}${ss}`;
-}
+const MODE_COPY = {
+  friendly: {
+    title: "친선전 매치 생성",
+    short: "실력 점수 기반 밸런스 자동 매칭",
+    description: "실력 점수를 기준으로 밸런스가 맞는 복식 경기를 자동으로 생성합니다.",
+    bullets: ["점수 밸런스 매칭", "혼복 · 남복 · 여복 자동 조합"],
+  },
+  tournament: {
+    title: "대회 대진표 생성",
+    short: "급수와 참가 종목 기준 매칭",
+    description: "급수와 참가 종목을 기준으로 경기 대진표를 생성합니다.",
+    bullets: ["급수 기준 경기", "남복 · 여복 · 혼복 설정"],
+  },
+  rivalry: {
+    title: "대항전 매치 생성",
+    short: "홈팀 vs 원정팀 팀 대결 매칭",
+    description: "홈팀과 원정팀 방식으로 팀 대결 대진표를 공정하게 생성합니다.",
+    bullets: ["팀 기반 매칭", "홈팀 · 원정팀 밸런스"],
+  },
+};
 
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
+const emptyPlayerForm = {
+  name: "",
+  gender: "남",
+  grade: "C",
+  maxGames: DEFAULT_MAX_GAMES,
+  customScore: "",
+  team: "홈팀",
+  events: { nam: true, yeo: false, hon: false },
+};
+
+const styles = {
+  page: {
+    minHeight: "100vh",
+    background: "linear-gradient(180deg, #f8fafc 0%, #eef2ff 45%, #f8fafc 100%)",
+    color: "#172554",
+    fontFamily:
+      "Inter, Pretendard, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  },
+  container: {
+    width: "min(1180px, calc(100% - 24px))",
+    margin: "0 auto",
+    padding: "24px 0 44px",
+  },
+  homeHero: {
+    position: "relative",
+    overflow: "hidden",
+    borderRadius: 32,
+    background: "rgba(255,255,255,0.92)",
+    border: "1px solid rgba(255,255,255,0.9)",
+    boxShadow: "0 18px 60px rgba(51, 65, 85, 0.12)",
+    padding: "32px 18px 28px",
+  },
+  watermark: {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "clamp(72px, 18vw, 220px)",
+    fontWeight: 900,
+    letterSpacing: 4,
+    color: "rgba(79, 70, 229, 0.04)",
+    pointerEvents: "none",
+    userSelect: "none",
+  },
+  brandLogoBox: {
+    width: "min(520px, 92%)",
+    margin: "0 auto 8px",
+    padding: "16px 20px",
+    borderRadius: 28,
+    background: "linear-gradient(135deg, #111827 0%, #1f2937 100%)",
+    color: "white",
+    boxShadow: "0 20px 40px rgba(15, 23, 42, 0.22)",
+    textAlign: "center",
+  },
+  brandTop: {
+    fontSize: "clamp(13px, 2vw, 18px)",
+    fontWeight: 800,
+    letterSpacing: 2,
+    color: "rgba(255,255,255,0.75)",
+  },
+  brandMain: {
+    marginTop: 6,
+    fontSize: "clamp(32px, 7vw, 68px)",
+    fontWeight: 900,
+    letterSpacing: 2,
+    lineHeight: 0.95,
+  },
+  brandSub: {
+    marginTop: 8,
+    fontSize: "clamp(16px, 2.4vw, 24px)",
+    fontWeight: 800,
+    letterSpacing: 1,
+    color: "#f59e0b",
+  },
+  titleBlock: { textAlign: "center", marginTop: 18, position: "relative", zIndex: 1 },
+  title: {
+    margin: 0,
+    fontSize: "clamp(34px, 6vw, 56px)",
+    lineHeight: 1,
+    fontWeight: 950,
+    background: "linear-gradient(135deg, #1e1b4b 0%, #4338ca 55%, #7c3aed 100%)",
+    WebkitBackgroundClip: "text",
+    backgroundClip: "text",
+    color: "transparent",
+  },
+  subtitle: {
+    marginTop: 8,
+    fontSize: "clamp(16px, 2.6vw, 24px)",
+    color: "#334155",
+    fontWeight: 800,
+  },
+  lead: {
+    margin: "14px auto 0",
+    width: "min(760px, 92%)",
+    fontSize: "clamp(14px, 2.2vw, 18px)",
+    color: "#475569",
+    lineHeight: 1.7,
+    textAlign: "center",
+    position: "relative",
+    zIndex: 1,
+  },
+  modeGrid: {
+    marginTop: 30,
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+    gap: 18,
+    position: "relative",
+    zIndex: 1,
+  },
+  card: {
+    borderRadius: 28,
+    background: "rgba(255,255,255,0.94)",
+    border: "1px solid rgba(255,255,255,0.95)",
+    boxShadow: "0 14px 35px rgba(15, 23, 42, 0.08)",
+  },
+  modeCard: {
+    borderRadius: 28,
+    overflow: "hidden",
+    background: "rgba(255,255,255,0.98)",
+    border: "1px solid rgba(255,255,255,0.98)",
+    boxShadow: "0 16px 36px rgba(15, 23, 42, 0.10)",
+    cursor: "pointer",
+    transition: "transform .18s ease, box-shadow .18s ease",
+  },
+  sectionCard: {
+    borderRadius: 28,
+    background: "rgba(255,255,255,0.94)",
+    border: "1px solid rgba(255,255,255,0.95)",
+    boxShadow: "0 14px 35px rgba(15, 23, 42, 0.08)",
+    overflow: "hidden",
+  },
+  button: {
+    border: "none",
+    cursor: "pointer",
+    borderRadius: 16,
+    padding: "12px 16px",
+    fontWeight: 800,
+    fontSize: 15,
+    transition: "all .15s ease",
+  },
+  input: {
+    width: "100%",
+    borderRadius: 16,
+    border: "1px solid #dbeafe",
+    background: "#f8fbff",
+    padding: "12px 14px",
+    fontSize: 15,
+    color: "#0f172a",
+    outline: "none",
+    boxSizing: "border-box",
+  },
+  select: {
+    width: "100%",
+    borderRadius: 16,
+    border: "1px solid #dbeafe",
+    background: "#f8fbff",
+    padding: "12px 14px",
+    fontSize: 15,
+    color: "#0f172a",
+    outline: "none",
+    boxSizing: "border-box",
+  },
+  label: { display: "block", fontSize: 12, fontWeight: 800, color: "#64748b", marginBottom: 8 },
+  pill: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    padding: "8px 12px",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+};
+
+const accentTheme = {
+  blue: {
+    soft: "linear-gradient(135deg, #e0f2fe 0%, #eef6ff 100%)",
+    shadow: "0 18px 34px rgba(59, 130, 246, 0.14)",
+    border: "#dbeafe",
+    text: "#1d4ed8",
+    button: "linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%)",
+    buttonText: "#fff",
+  },
+  purple: {
+    soft: "linear-gradient(135deg, #ede9fe 0%, #f5f3ff 100%)",
+    shadow: "0 18px 34px rgba(124, 58, 237, 0.15)",
+    border: "#e9d5ff",
+    text: "#6d28d9",
+    button: "linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%)",
+    buttonText: "#fff",
+  },
+  orange: {
+    soft: "linear-gradient(135deg, #ffedd5 0%, #fff7ed 100%)",
+    shadow: "0 18px 34px rgba(249, 115, 22, 0.16)",
+    border: "#fed7aa",
+    text: "#c2410c",
+    button: "linear-gradient(135deg, #fb923c 0%, #f97316 100%)",
+    buttonText: "#fff",
+  },
+};
+
+const clampInt = (v, min, max) => Math.max(min, Math.min(max, Math.trunc(v)));
+const deepClone = (v) => JSON.parse(JSON.stringify(v));
+const pairKey = (a, b) => [a, b].sort((x, y) => x - y).join("_");
+const opponentKey = (a, b) => [a, b].sort((x, y) => x - y).join("_");
+
+const shuffle = (arr) => {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
   }
-}
+  return copy;
+};
 
-function saveState(state) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {}
-}
+const getKoreanDateString = () => {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+};
 
-function getBaseScore(grade, gender) {
-  return gender === "남" ? MALE_POINTS[grade] ?? 3 : FEMALE_POINTS[grade] ?? 2;
-}
+const normalizeEventsByGender = (gender, events) => {
+  const base = deepClone(EVENT_DEFAULTS_BY_GENDER[gender]);
+  if (!events) return base;
+  if (gender === "남") return { nam: !!events.nam, yeo: false, hon: !!events.hon };
+  return { nam: false, yeo: !!events.yeo, hon: !!events.hon };
+};
 
-function isManualScore(player) {
-  return (
-    player.scoreOverride !== null &&
-    player.scoreOverride !== undefined &&
-    player.scoreOverride !== ""
-  );
-}
-
-function getAppliedScore(player) {
-  return isManualScore(player)
-    ? Number(player.scoreOverride)
-    : getBaseScore(player.grade, player.gender);
-}
-
-function playerShortName(name) {
-  return String(name ?? "").slice(0, 5);
-}
-
-function scheduleName(name) {
-  const t = String(name ?? "");
-  if (t.length >= 4) return `${t.slice(0, 2)}\n${t.slice(2)}`;
-  return t;
-}
-
-function formatScore(n) {
-  const x = Number(n);
-  if (Number.isNaN(x)) return "";
-  return x % 1 === 0 ? String(x.toFixed(0)) : x.toFixed(1);
-}
-
-function gradeColor(grade) {
-  return GRADE_COLORS[grade] || "#9ca3af";
-}
-
-function getType(team) {
-  const male = team.filter((p) => p.gender === "남").length;
-  if (male === 2) return "남복";
-  if (male === 1) return "혼복";
-  return "여복";
-}
-
-function teamScore(team) {
-  return team.reduce((sum, p) => sum + getAppliedScore(p), 0);
-}
-
-// 남복 vs 혼복 금지, 남복 vs 여복 금지
-function forbiddenMatch(typeA, typeB) {
-  const mixedVsMale =
-    (typeA === "혼복" && typeB === "남복") ||
-    (typeA === "남복" && typeB === "혼복");
-
-  const maleVsFemale =
-    (typeA === "남복" && typeB === "여복") ||
-    (typeA === "여복" && typeB === "남복");
-
-  return mixedVsMale || maleVsFemale;
-}
-
-function weakerMixedRuleOk(team, weaker) {
-  if (!weaker) return true;
-  const male = team.find((p) => p.gender === "남");
-  const female = team.find((p) => p.gender === "여");
-  if (male && female) return getAppliedScore(male) >= getAppliedScore(female);
-  return true;
-}
-
-function pairKey(a, b) {
-  return [a, b].sort().join("::");
-}
-
-function buildPlayerMap(players) {
-  const m = new Map();
-  players.forEach((p) => m.set(p.id, p));
-  return m;
-}
-
-function buildNameCountMap(players) {
-  const map = new Map();
-  players.forEach((p) => {
-    const key = normalize(p.name);
-    map.set(key, (map.get(key) || 0) + 1);
-  });
-  return map;
-}
-
-function getAssignedCountMap(schedule) {
-  const map = new Map();
-  if (!schedule?.rounds) return map;
-  schedule.rounds.forEach((r) => {
-    r.matches.forEach((m) => {
-      [...m.teamAIds, ...m.teamBIds].forEach((id) => {
-        map.set(id, (map.get(id) || 0) + 1);
-      });
-    });
-  });
-  return map;
-}
-
-function evalFourPlayers(four, options, partnerHistory, opponentHistory) {
-  const [a, b, c, d] = four;
-  const splits = [
-    { teamA: [a, b], teamB: [c, d] },
-    { teamA: [a, c], teamB: [b, d] },
-    { teamA: [a, d], teamB: [b, c] },
-  ];
-
-  let best = null;
-  let bestPenalty = Infinity;
-
-  for (const split of splits) {
-    const typeA = getType(split.teamA);
-    const typeB = getType(split.teamB);
-
-    if (forbiddenMatch(typeA, typeB)) continue;
-
-    const scoreA = teamScore(split.teamA);
-    const scoreB = teamScore(split.teamB);
-    const diff = Math.abs(scoreA - scoreB);
-
-    // 점수차 절대 강제
-    if (diff > options.maxDiff) continue;
-
-    const mixedVsFemale =
-      (typeA === "혼복" && typeB === "여복") ||
-      (typeA === "여복" && typeB === "혼복");
-
-    if (mixedVsFemale) {
-      const mixedScore = typeA === "혼복" ? scoreA : scoreB;
-      const femaleScore = typeA === "여복" ? scoreA : scoreB;
-      const gap = femaleScore - mixedScore;
-      if (gap < options.mixedVsFemaleGapMin || gap > options.mixedVsFemaleGapMax) {
-        continue;
-      }
-    }
-
-    const teamAWeaker = scoreA < scoreB;
-    const teamBWeaker = scoreB < scoreA;
-
-    if (!(scoreA === scoreB || weakerMixedRuleOk(split.teamA, teamAWeaker))) continue;
-    if (!(scoreA === scoreB || weakerMixedRuleOk(split.teamB, teamBWeaker))) continue;
-
-    const partnerAKey = pairKey(split.teamA[0].id, split.teamA[1].id);
-    const partnerBKey = pairKey(split.teamB[0].id, split.teamB[1].id);
-
-    const partnerRepeatA = partnerHistory.get(partnerAKey) || 0;
-    const partnerRepeatB = partnerHistory.get(partnerBKey) || 0;
-
-    let partnerPenalty = 0;
-    if (partnerRepeatA >= 1) partnerPenalty += 18 + partnerRepeatA * 18;
-    if (partnerRepeatB >= 1) partnerPenalty += 18 + partnerRepeatB * 18;
-
-    let opponentPenalty = 0;
-    for (const pA of split.teamA) {
-      for (const pB of split.teamB) {
-        const repeat = opponentHistory.get(pairKey(pA.id, pB.id)) || 0;
-        if (repeat >= 1) opponentPenalty += 15 + repeat * 15;
-      }
-    }
-
-    const penalty = diff * 10 + partnerPenalty + opponentPenalty;
-
-    if (penalty < bestPenalty) {
-      bestPenalty = penalty;
-      best = {
-        ...split,
-        scoreA,
-        scoreB,
-        diff,
-        typeA,
-        typeB,
-        penalty,
-      };
-    }
-  }
-
-  return best;
-}
-
-function buildRound(players, courts, options, partnerHistory, opponentHistory, assignedMap, shortagePriority) {
-  let available = players.filter((p) => (assignedMap.get(p.id) || 0) < p.targetGames);
-  if (available.length < 4) return [];
-
-  available = [...available].sort((a, b) => {
-    const remainA = a.targetGames - (assignedMap.get(a.id) || 0);
-    const remainB = b.targetGames - (assignedMap.get(b.id) || 0);
-
-    if (shortagePriority && remainA !== remainB) return remainB - remainA;
-    if (
-      shortagePriority &&
-      (assignedMap.get(a.id) || 0) !== (assignedMap.get(b.id) || 0)
-    ) {
-      return (assignedMap.get(a.id) || 0) - (assignedMap.get(b.id) || 0);
-    }
-
-    const scoreGap = getAppliedScore(b) - getAppliedScore(a);
-    if (scoreGap !== 0) return scoreGap;
-    return a.name.localeCompare(b.name);
-  });
-
-  const matches = [];
-  const usedIds = new Set();
-
-  for (let court = 1; court <= courts; court++) {
-    const candidates = available.filter((p) => !usedIds.has(p.id));
-    if (candidates.length < 4) break;
-
-    const anchors = candidates.slice(0, Math.min(8, candidates.length));
-    let bestCandidate = null;
-
-    for (const anchor of anchors) {
-      const others = candidates.filter((p) => p.id !== anchor.id).slice(0, 16);
-
-      for (let i = 0; i < others.length; i++) {
-        for (let j = i + 1; j < others.length; j++) {
-          for (let k = j + 1; k < others.length; k++) {
-            const four = [anchor, others[i], others[j], others[k]];
-            const result = evalFourPlayers(four, options, partnerHistory, opponentHistory);
-            if (!result) continue;
-
-            if (!bestCandidate || result.penalty < bestCandidate.penalty) {
-              bestCandidate = { court, ...result };
-            }
-          }
-        }
-      }
-    }
-
-    if (!bestCandidate) break;
-
-    matches.push(bestCandidate);
-    [...bestCandidate.teamA, ...bestCandidate.teamB].forEach((p) =>
-      usedIds.add(p.id)
-    );
-  }
-
-  return matches;
-}
-
-function generateSchedule(players, settings) {
-  const assignedMap = new Map(players.map((p) => [p.id, 0]));
-  const partnerHistory = new Map();
-  const opponentHistory = new Map();
-  const rounds = [];
-
-  const options = {
-    maxDiff: Number(settings.maxDiff) || 1.0,
-    mixedVsFemaleGapMin: Number(settings.mixedVsFemaleGapMin) || 1,
-    mixedVsFemaleGapMax: Number(settings.mixedVsFemaleGapMax) || 2,
-  };
-
-  let guard = 0;
-  while (guard < 300) {
-    guard += 1;
-
-    if (settings.maxRounds && rounds.length >= settings.maxRounds) break;
-
-    const remaining = players.filter((p) => (assignedMap.get(p.id) || 0) < p.targetGames);
-    if (remaining.length < 4) break;
-
-    const matches = buildRound(
-      players,
-      settings.courts,
-      options,
-      partnerHistory,
-      opponentHistory,
-      assignedMap,
-      settings.shortagePriority
-    );
-
-    if (!matches.length) break;
-
-    matches.forEach((m) => {
-      [...m.teamA, ...m.teamB].forEach((p) => {
-        assignedMap.set(p.id, (assignedMap.get(p.id) || 0) + 1);
-      });
-
-      const partnerA = pairKey(m.teamA[0].id, m.teamA[1].id);
-      const partnerB = pairKey(m.teamB[0].id, m.teamB[1].id);
-
-      partnerHistory.set(partnerA, (partnerHistory.get(partnerA) || 0) + 1);
-      partnerHistory.set(partnerB, (partnerHistory.get(partnerB) || 0) + 1);
-
-      for (const a of m.teamA) {
-        for (const b of m.teamB) {
-          const key = pairKey(a.id, b.id);
-          opponentHistory.set(key, (opponentHistory.get(key) || 0) + 1);
-        }
-      }
-    });
-
-    rounds.push({
-      id: uid(),
-      title: `ROUND ${rounds.length + 1}`,
-      matches: matches.map((m) => ({
-        id: uid(),
-        court: m.court,
-        teamAIds: m.teamA.map((p) => p.id),
-        teamBIds: m.teamB.map((p) => p.id),
-        scoreA: m.scoreA,
-        scoreB: m.scoreB,
-        diff: m.diff,
-        typeA: m.typeA,
-        typeB: m.typeB,
-      })),
-    });
-  }
+const makePlayer = (id, raw) => {
+  const gender = raw.gender === "여" ? "여" : "남";
+  const grade = GRADES.includes(raw.grade) ? raw.grade : "C";
+  const maxGames = clampInt(Number(raw.maxGames) || DEFAULT_MAX_GAMES, 1, MAX_GAMES);
+  const customScore =
+    raw.customScore === "" || raw.customScore === null || raw.customScore === undefined
+      ? null
+      : Number.isFinite(Number(raw.customScore))
+      ? Number(raw.customScore)
+      : null;
 
   return {
-    title: settings.title || DEFAULT_TITLE,
-    createdAt: new Date().toISOString(),
-    rounds,
+    id,
+    name: String(raw.name || "").trim(),
+    gender,
+    grade,
+    maxGames,
+    customScore,
+    team: TEAMS.includes(raw.team) ? raw.team : "홈팀",
+    events: normalizeEventsByGender(gender, raw.events),
   };
-}
+};
 
-function toSummary(players, assignedMap) {
-  return players
-    .map((p) => {
-      const assigned = assignedMap.get(p.id) || 0;
-      return {
-        ...p,
-        assigned,
-        diff: assigned - p.targetGames,
-      };
-    })
-    .sort((a, b) => {
-      if (a.diff !== b.diff) return a.diff - b.diff;
-      return a.name.localeCompare(b.name);
-    });
-}
+const getBaseScore = (grade, gender) => (gender === "남" ? MALE_POINTS[grade] : FEMALE_POINTS[grade]);
+const getPlayerScore = (player) =>
+  typeof player.customScore === "number" && Number.isFinite(player.customScore)
+    ? player.customScore
+    : getBaseScore(player.grade, player.gender);
 
-function downloadPlayersJson(players) {
-  const blob = new Blob([JSON.stringify(players, null, 2)], {
-    type: "application/json",
+const getTeamType = (team) => {
+  const maleCount = team.filter((p) => p.gender === "남").length;
+  if (maleCount === 2) return "NAM";
+  if (maleCount === 1) return "HON";
+  return "YEO";
+};
+
+const typeLabel = (type) => ({ NAM: "남복", YEO: "여복", HON: "혼복" }[type] || type);
+
+const teamAllowedByEvents = (team, modeValue) => {
+  if (modeValue !== "tournament") return true;
+  const type = getTeamType(team);
+  if (type === "NAM") return team.every((p) => p.gender === "남" && p.events.nam);
+  if (type === "YEO") return team.every((p) => p.gender === "여" && p.events.yeo);
+  return (
+    team.length === 2 &&
+    team.some((p) => p.gender === "남") &&
+    team.some((p) => p.gender === "여") &&
+    team.every((p) => p.events.hon)
+  );
+};
+
+const eventKeyForCrossType = (typeA, typeB) => [typeA, typeB].sort().join("_");
+
+const buildMeta = (basePlayers) => {
+  const playerStats = {};
+  const teamPairCounts = {};
+  const opponentCounts = {};
+  basePlayers.forEach((p) => {
+    playerStats[p.id] = {
+      gamesPlayed: 0,
+      sameTypeGames: { NAM: 0, YEO: 0, HON: 0 },
+    };
   });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `players_backup_${makeTimestamp()}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+  return { playerStats, teamPairCounts, opponentCounts };
+};
 
-function exportScheduleExcel(schedule, playerMap, title) {
-  const rows = [];
-  schedule.rounds.forEach((round) => {
-    round.matches.forEach((m) => {
-      const a = m.teamAIds.map((id) => playerMap.get(id)?.name || "");
-      const b = m.teamBIds.map((id) => playerMap.get(id)?.name || "");
+const enrichPlayers = (basePlayers, meta) =>
+  basePlayers.map((p) => ({
+    ...p,
+    score: getPlayerScore(p),
+    gamesPlayed: meta.playerStats[p.id]?.gamesPlayed ?? 0,
+    remaining: p.maxGames - (meta.playerStats[p.id]?.gamesPlayed ?? 0),
+  }));
 
-      rows.push({
-        제목: title,
-        라운드: round.title,
-        코트: `${m.court}코트`,
-        타입: `${m.typeA} vs ${m.typeB}`,
-        "TEAM A 1": a[0] || "",
-        "TEAM A 2": a[1] || "",
-        "TEAM B 1": b[0] || "",
-        "TEAM B 2": b[1] || "",
-        "TEAM A 합": formatScore(m.scoreA),
-        "TEAM B 합": formatScore(m.scoreB),
-        "점수차 Δ": formatScore(m.diff),
-      });
-    });
+const evaluateFriendlyLikeMatch = (teamA, teamB) => {
+  const scoreA = teamA.reduce((s, p) => s + p.score, 0);
+  const scoreB = teamB.reduce((s, p) => s + p.score, 0);
+  const typeA = getTeamType(teamA);
+  const typeB = getTeamType(teamB);
+  const diff = Math.abs(scoreA - scoreB);
+
+  if (typeA === typeB) {
+    if (diff > MAX_DIFF_SAME_TYPE) return null;
+    return {
+      typeA,
+      typeB,
+      scoreA,
+      scoreB,
+      diff,
+      matchLabel: `${typeLabel(typeA)} vs ${typeLabel(typeB)}`,
+      basePenalty: diff * 10,
+    };
+  }
+
+  const key = eventKeyForCrossType(typeA, typeB);
+  const rule = CROSS_TYPE_RULES[key];
+  if (!rule) return null;
+
+  const strongerScore = rule.stronger === typeA ? scoreA : scoreB;
+  const weakerScore = rule.stronger === typeA ? scoreB : scoreA;
+  if (strongerScore - weakerScore < rule.minGap) return null;
+
+  let basePenalty = 200;
+  if (key === "HON_YEO") basePenalty = 100;
+  if (key === "HON_NAM") basePenalty = 160;
+  if (key === "NAM_YEO") basePenalty = 220;
+
+  return {
+    typeA,
+    typeB,
+    scoreA,
+    scoreB,
+    diff,
+    matchLabel: `${typeLabel(typeA)} vs ${typeLabel(typeB)}`,
+    basePenalty: basePenalty + Math.abs(strongerScore - weakerScore - rule.minGap) * 8,
+  };
+};
+
+const evaluateTournamentMatch = (teamA, teamB) => {
+  const typeA = getTeamType(teamA);
+  const typeB = getTeamType(teamB);
+  if (typeA !== typeB) return null;
+  if (![...teamA, ...teamB].every((p) => p.grade === teamA[0].grade)) return null;
+  if (!teamAllowedByEvents(teamA, "tournament") || !teamAllowedByEvents(teamB, "tournament")) return null;
+
+  const scoreA = teamA.reduce((s, p) => s + p.score, 0);
+  const scoreB = teamB.reduce((s, p) => s + p.score, 0);
+  const diff = Math.abs(scoreA - scoreB);
+  if (diff > MAX_DIFF_SAME_TYPE) return null;
+
+  return {
+    typeA,
+    typeB,
+    scoreA,
+    scoreB,
+    diff,
+    matchLabel: `${teamA[0].grade}급 ${typeLabel(typeA)}`,
+    basePenalty: diff * 10,
+  };
+};
+
+const evaluateRivalryStrictMatch = (teamA, teamB) => {
+  const teamNameA = teamA[0].team;
+  const teamNameB = teamB[0].team;
+  if (teamNameA === teamNameB) return null;
+  if (!teamA.every((p) => p.team === teamNameA) || !teamB.every((p) => p.team === teamNameB)) return null;
+
+  const typeA = getTeamType(teamA);
+  const typeB = getTeamType(teamB);
+  if (typeA !== typeB) return null;
+  if (![...teamA, ...teamB].every((p) => p.grade === teamA[0].grade)) return null;
+
+  const scoreA = teamA.reduce((s, p) => s + p.score, 0);
+  const scoreB = teamB.reduce((s, p) => s + p.score, 0);
+  const diff = Math.abs(scoreA - scoreB);
+  if (diff > MAX_DIFF_SAME_TYPE) return null;
+
+  return {
+    typeA,
+    typeB,
+    scoreA,
+    scoreB,
+    diff,
+    matchLabel: `${teamA[0].grade}급 ${typeLabel(typeA)} (${teamNameA} vs ${teamNameB})`,
+    basePenalty: diff * 10,
+  };
+};
+
+const evaluateRivalryFlexibleMatch = (teamA, teamB) => {
+  const teamNameA = teamA[0].team;
+  const teamNameB = teamB[0].team;
+  if (teamNameA === teamNameB) return null;
+  if (!teamA.every((p) => p.team === teamNameA) || !teamB.every((p) => p.team === teamNameB)) return null;
+
+  const base = evaluateFriendlyLikeMatch(teamA, teamB);
+  if (!base) return null;
+
+  const all = [...teamA, ...teamB];
+  const gradePenalty = new Set(all.map((p) => p.grade)).size === 1 ? 0 : 80;
+  return {
+    ...base,
+    matchLabel: `${base.matchLabel} (${teamNameA} vs ${teamNameB})`,
+    basePenalty: base.basePenalty + gradePenalty,
+  };
+};
+
+const scorePreferencePenalty = (meta, teamA, teamB, evaluated) => {
+  let penalty = evaluated.basePenalty;
+  const allPlayers = [...teamA, ...teamB];
+
+  allPlayers.forEach((player) => {
+    const st = meta.playerStats[player.id];
+    penalty += st.gamesPlayed * 16;
+    penalty -= Math.max(0, player.maxGames - st.gamesPlayed) * 5;
   });
 
-  const ws = XLSX.utils.json_to_sheet(rows);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "대진표");
-  XLSX.writeFile(wb, `${title}_${makeTimestamp()}.xlsx`);
-}
+  const teamAType = getTeamType(teamA);
+  const teamBType = getTeamType(teamB);
+  teamA.forEach((p) => {
+    penalty += meta.playerStats[p.id].sameTypeGames[teamAType] * 2;
+  });
+  teamB.forEach((p) => {
+    penalty += meta.playerStats[p.id].sameTypeGames[teamBType] * 2;
+  });
 
-async function exportSchedulePpt(schedule, players, settings) {
-  if (!schedule?.rounds?.length) return;
+  [teamA, teamB].forEach((team) => {
+    const key = pairKey(team[0].id, team[1].id);
+    penalty += (meta.teamPairCounts[key] || 0) * 35;
+  });
 
-  const playerMap = buildPlayerMap(players);
-  const pptx = new PptxGenJS();
+  const crossPairs = [
+    [teamA[0].id, teamB[0].id],
+    [teamA[0].id, teamB[1].id],
+    [teamA[1].id, teamB[0].id],
+    [teamA[1].id, teamB[1].id],
+  ];
+  crossPairs.forEach(([a, b]) => {
+    penalty += (meta.opponentCounts[opponentKey(a, b)] || 0) * 8;
+  });
 
-  pptx.layout =
-    settings.pptOrientation === "portrait" ? "LAYOUT_STANDARD" : "LAYOUT_WIDE";
-  pptx.author = "ChatGPT";
-  pptx.title = settings.title || DEFAULT_TITLE;
-  pptx.lang = "ko-KR";
+  return penalty;
+};
 
-  const pageW = settings.pptOrientation === "portrait" ? 10 : 13.333;
-  const pageH = 7.5;
-  const margin = 0.35;
-  const headerH = 0.65;
-  const title = settings.title || DEFAULT_TITLE;
-
-  for (const round of schedule.rounds) {
-    const slide = pptx.addSlide();
-    slide.background = { color: "F8FBFF" };
-
-    slide.addShape(pptx.ShapeType.rect, {
-      x: 0,
-      y: 0,
-      w: pageW,
-      h: headerH,
-      fill: { color: "0F3F6B" },
-      line: { color: "0F3F6B" },
-    });
-
-    slide.addText(`🏸 ${title}`, {
-      x: margin,
-      y: 0.12,
-      w: pageW - margin * 2,
-      h: 0.22,
-      color: "FFFFFF",
-      bold: true,
-      fontSize: 20,
-      fontFace: "Malgun Gothic",
-      margin: 0,
-    });
-
-    slide.addText(
-      `${new Date(schedule.createdAt).toLocaleDateString("ko-KR")} | ${settings.courts}코트 | ${round.title}`,
-      {
-        x: margin,
-        y: 0.38,
-        w: pageW - margin * 2,
-        h: 0.18,
-        color: "DCE8F5",
-        fontSize: 9,
-        fontFace: "Malgun Gothic",
-        margin: 0,
+const buildTeamCandidates = (pool, modeValue) => {
+  const teams = [];
+  for (let i = 0; i < pool.length; i += 1) {
+    for (let j = i + 1; j < pool.length; j += 1) {
+      const team = [pool[i], pool[j]];
+      if (modeValue === "tournament" && !teamAllowedByEvents(team, modeValue)) continue;
+      if (modeValue === "rivalry") {
+        const teamNames = new Set(team.map((p) => p.team));
+        if (teamNames.size !== 1) continue;
       }
-    );
-
-    slide.addText(round.title, {
-      x: margin,
-      y: headerH + 0.05,
-      w: pageW - margin * 2,
-      h: 0.28,
-      color: "0F3F6B",
-      bold: true,
-      fontSize: 15,
-      align: "center",
-      margin: 0,
-    });
-
-    const cols = 2;
-    const gapX = 0.18;
-    const gapY = 0.16;
-    const topY = headerH + 0.42;
-    const contentW = pageW - margin * 2;
-    const cardW = (contentW - gapX) / cols;
-    const rows = Math.ceil(round.matches.length / cols);
-    const availableH = pageH - topY - 0.28;
-    const cardH = Math.min(1.9, (availableH - gapY * (rows - 1)) / Math.max(rows, 1));
-
-    round.matches.forEach((m, idx) => {
-      const col = idx % cols;
-      const row = Math.floor(idx / cols);
-      const x = margin + col * (cardW + gapX);
-      const y = topY + row * (cardH + gapY);
-
-      const teamA = m.teamAIds.map((id) => playerMap.get(id)).filter(Boolean);
-      const teamB = m.teamBIds.map((id) => playerMap.get(id)).filter(Boolean);
-
-      slide.addShape(pptx.ShapeType.roundRect, {
-        x,
-        y,
-        w: cardW,
-        h: cardH,
-        rectRadius: 0.08,
-        fill: { color: "FFFFFF" },
-        line: { color: "BFD2E8", pt: 1 },
+      teams.push({
+        players: team,
+        type: getTeamType(team),
+        score: team.reduce((s, p) => s + p.score, 0),
       });
-
-      slide.addText(`${m.court}코트`, {
-        x: x + 0.1,
-        y: y + 0.08,
-        w: 0.72,
-        h: 0.18,
-        color: "FFFFFF",
-        bold: true,
-        fontSize: 10,
-        align: "center",
-        fill: { color: "0F3F6B" },
-        margin: 0,
-      });
-
-      slide.addText(`${m.typeA} vs ${m.typeB}`, {
-        x: x + 0.9,
-        y: y + 0.1,
-        w: 1.2,
-        h: 0.14,
-        color: "5B6D85",
-        fontSize: 8.5,
-        margin: 0,
-      });
-
-      slide.addText(`Δ ${formatScore(m.diff)}`, {
-        x: x + cardW - 0.85,
-        y: y + 0.08,
-        w: 0.72,
-        h: 0.18,
-        color: "6D28D9",
-        bold: true,
-        fontSize: 11,
-        align: "center",
-        fill: { color: "F5F3FF" },
-        line: { color: "C4B5FD", pt: 1 },
-        margin: 0,
-      });
-
-      const leftX = x + 0.1;
-      const topBlockY = y + 0.38;
-      const boxW = (cardW - 0.45) / 2;
-      const boxH = cardH - 0.52;
-
-      slide.addShape(pptx.ShapeType.roundRect, {
-        x: leftX,
-        y: topBlockY,
-        w: boxW,
-        h: boxH,
-        rectRadius: 0.06,
-        fill: { color: "F8FBFF" },
-        line: { color: "D8E6F4", pt: 1 },
-      });
-
-      slide.addText("TEAM A", {
-        x: leftX + 0.08,
-        y: topBlockY + 0.04,
-        w: boxW - 0.16,
-        h: 0.12,
-        color: "475569",
-        bold: true,
-        fontSize: 8.5,
-        margin: 0,
-      });
-
-      teamA.forEach((p, i) => {
-        slide.addShape(pptx.ShapeType.ellipse, {
-          x: leftX + 0.08,
-          y: topBlockY + 0.22 + i * 0.22,
-          w: 0.08,
-          h: 0.08,
-          fill: { color: gradeColor(p.grade).replace("#", "") },
-          line: { color: gradeColor(p.grade).replace("#", ""), pt: 1 },
-        });
-
-        slide.addText(scheduleName(p.name), {
-          x: leftX + 0.19,
-          y: topBlockY + 0.19 + i * 0.21,
-          w: boxW - 0.25,
-          h: 0.18,
-          color: "0F172A",
-          bold: true,
-          fontSize: 10.5,
-          margin: 0,
-        });
-      });
-
-      slide.addText(`TEAM A ${formatScore(m.scoreA)}`, {
-        x: leftX + 0.08,
-        y: topBlockY + boxH - 0.22,
-        w: boxW - 0.16,
-        h: 0.16,
-        color: "0F172A",
-        bold: true,
-        fontSize: 11.5,
-        align: "center",
-        margin: 0,
-      });
-
-      slide.addText("VS", {
-        x: leftX + boxW + 0.03,
-        y: topBlockY + boxH / 2 - 0.1,
-        w: 0.18,
-        h: 0.16,
-        color: "334155",
-        bold: true,
-        fontSize: 12,
-        align: "center",
-        margin: 0,
-      });
-
-      const rightX = leftX + boxW + 0.25;
-
-      slide.addShape(pptx.ShapeType.roundRect, {
-        x: rightX,
-        y: topBlockY,
-        w: boxW,
-        h: boxH,
-        rectRadius: 0.06,
-        fill: { color: "F8FBFF" },
-        line: { color: "D8E6F4", pt: 1 },
-      });
-
-      slide.addText("TEAM B", {
-        x: rightX + 0.08,
-        y: topBlockY + 0.04,
-        w: boxW - 0.16,
-        h: 0.12,
-        color: "475569",
-        bold: true,
-        fontSize: 8.5,
-        margin: 0,
-      });
-
-      teamB.forEach((p, i) => {
-        slide.addShape(pptx.ShapeType.ellipse, {
-          x: rightX + 0.08,
-          y: topBlockY + 0.22 + i * 0.22,
-          w: 0.08,
-          h: 0.08,
-          fill: { color: gradeColor(p.grade).replace("#", "") },
-          line: { color: gradeColor(p.grade).replace("#", ""), pt: 1 },
-        });
-
-        slide.addText(scheduleName(p.name), {
-          x: rightX + 0.19,
-          y: topBlockY + 0.19 + i * 0.21,
-          w: boxW - 0.25,
-          h: 0.18,
-          color: "0F172A",
-          bold: true,
-          fontSize: 10.5,
-          margin: 0,
-        });
-      });
-
-      slide.addText(`TEAM B ${formatScore(m.scoreB)}`, {
-        x: rightX + 0.08,
-        y: topBlockY + boxH - 0.22,
-        w: boxW - 0.16,
-        h: 0.16,
-        color: "0F172A",
-        bold: true,
-        fontSize: 11.5,
-        align: "center",
-        margin: 0,
-      });
-    });
+    }
   }
+  return teams;
+};
 
-  await pptx.writeFile({
-    fileName: `${title}_${makeTimestamp()}.pptx`,
-  });
-}
-
-export default function App() {
-  const loaded = loadState();
-
-  const [title, setTitle] = useState(loaded?.title || DEFAULT_TITLE);
-  const [players, setPlayers] = useState(loaded?.players || []);
-  const [schedule, setSchedule] = useState(loaded?.schedule || null);
-
-  const [courts, setCourts] = useState(loaded?.courts || 4);
-  const [defaultTargetGames, setDefaultTargetGames] = useState(
-    loaded?.defaultTargetGames || 3
-  );
-  const [maxRoundsInput, setMaxRoundsInput] = useState(
-    loaded?.maxRoundsInput || ""
-  );
-  const [shortagePriority, setShortagePriority] = useState(
-    loaded?.shortagePriority || false
-  );
-
-  const [maxDiff, setMaxDiff] = useState(loaded?.maxDiff || 1.0);
-  const [mixedVsFemaleGapMin, setMixedVsFemaleGapMin] = useState(
-    loaded?.mixedVsFemaleGapMin || 1
-  );
-  const [mixedVsFemaleGapMax, setMixedVsFemaleGapMax] = useState(
-    loaded?.mixedVsFemaleGapMax || 2
-  );
-
-  const [pptOrientation, setPptOrientation] = useState(
-    loaded?.pptOrientation || "landscape"
-  );
-
-  const [newPlayer, setNewPlayer] = useState({
-    name: "",
-    gender: "남",
-    grade: "C",
-    targetGames: 3,
-  });
-
-  const [expandedRounds, setExpandedRounds] = useState(
-    loaded?.schedule?.rounds?.map((r) => r.id) || []
-  );
-
-  const fileInputRef = useRef(null);
-  const jsonInputRef = useRef(null);
-
-  useEffect(() => {
-    saveState({
-      title,
-      players,
-      schedule,
-      courts,
-      defaultTargetGames,
-      maxRoundsInput,
-      shortagePriority,
-      maxDiff,
-      mixedVsFemaleGapMin,
-      mixedVsFemaleGapMax,
-      pptOrientation,
-    });
-  }, [
-    title,
-    players,
-    schedule,
-    courts,
-    defaultTargetGames,
-    maxRoundsInput,
-    shortagePriority,
-    maxDiff,
-    mixedVsFemaleGapMin,
-    mixedVsFemaleGapMax,
-    pptOrientation,
-  ]);
-
-  useEffect(() => {
-    setSchedule(null);
-    setExpandedRounds([]);
-  }, [
-    courts,
-    maxRoundsInput,
-    shortagePriority,
-    maxDiff,
-    mixedVsFemaleGapMin,
-    mixedVsFemaleGapMax,
-    pptOrientation,
-    title,
-  ]);
-
-  const playerMap = useMemo(() => buildPlayerMap(players), [players]);
-  const nameCountMap = useMemo(() => buildNameCountMap(players), [players]);
-  const assignedMap = useMemo(() => getAssignedCountMap(schedule), [schedule]);
-  const summary = useMemo(() => toSummary(players, assignedMap), [players, assignedMap]);
-
-  function addPlayer() {
-    const name = normalize(newPlayer.name);
-    if (!name) return;
-
-    setPlayers((prev) => [
-      ...prev,
-      {
-        id: uid(),
-        name,
-        gender: newPlayer.gender,
-        grade: newPlayer.grade,
-        targetGames: clamp(Number(newPlayer.targetGames) || 3, 1, 30),
-        scoreOverride: null,
-      },
-    ]);
-
-    setNewPlayer((prev) => ({ ...prev, name: "" }));
+const selectGreedyMatches = (possibleMatches, usedIdsGlobal) => {
+  const localUsed = new Set();
+  const selected = [];
+  for (const match of possibleMatches) {
+    const ids = [...match.teamA, ...match.teamB].map((p) => p.id);
+    if (ids.some((id) => usedIdsGlobal.has(id) || localUsed.has(id))) continue;
+    ids.forEach((id) => localUsed.add(id));
+    selected.push(match);
+    if (selected.length >= TOTAL_COURTS) break;
   }
+  return selected;
+};
 
-  function updatePlayer(id, patch) {
-    setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
-  }
+const buildCandidateMatches = (pool, meta, modeValue, evaluator) => {
+  const teams = buildTeamCandidates(pool, modeValue);
+  const possibleMatches = [];
 
-  function removePlayer(id) {
-    setPlayers((prev) => prev.filter((p) => p.id !== id));
-  }
-
-  function resetScoreToAuto(id) {
-    setPlayers((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, scoreOverride: null } : p))
-    );
-  }
-
-  function applyTargetToAll() {
-    const value = clamp(Number(defaultTargetGames) || 3, 1, 30);
-    setPlayers((prev) => prev.map((p) => ({ ...p, targetGames: value })));
-  }
-
-  function buildScheduleNow() {
-    const maxRounds =
-      maxRoundsInput === ""
-        ? null
-        : clamp(Number(maxRoundsInput) || 1, 1, 999);
-
-    const result = generateSchedule(players, {
-      title,
-      courts: clamp(Number(courts) || 4, 1, 10),
-      maxRounds,
-      shortagePriority,
-      maxDiff,
-      mixedVsFemaleGapMin,
-      mixedVsFemaleGapMax,
-    });
-
-    setSchedule(result);
-    setExpandedRounds(result.rounds.map((r) => r.id));
-  }
-
-  function toggleRound(id) {
-    setExpandedRounds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-    );
-  }
-
-  function expandAll() {
-    if (!schedule?.rounds) return;
-    setExpandedRounds(schedule.rounds.map((r) => r.id));
-  }
-
-  function collapseAll() {
-    setExpandedRounds([]);
-  }
-
-  async function handleExcelUpload(file) {
-    if (!file) return;
-    try {
-      const data = await file.arrayBuffer();
-      const wb = XLSX.read(data, { type: "array" });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-
-      const mapped = rows
-        .map((row) => {
-          const name = normalize(row["이름"] || row["name"] || row["Name"]);
-          if (!name) return null;
-
-          const gender =
-            normalize(row["성별"] || row["gender"]) === "여" ? "여" : "남";
-          const gradeRaw = normalize(row["급수"] || row["grade"]);
-          const grade = GRADES.includes(gradeRaw) ? gradeRaw : "C";
-          const targetGames = clamp(
-            Number(row["목표경기"] || row["targetGames"] || 3),
-            1,
-            30
-          );
-          const applied = row["적용점수"] || row["score"] || "";
-          const scoreOverride =
-            applied === "" || applied === null || applied === undefined
-              ? null
-              : Number(applied);
-
-          return {
-            id: uid(),
-            name,
-            gender,
-            grade,
-            targetGames,
-            scoreOverride: Number.isFinite(Number(scoreOverride))
-              ? Number(scoreOverride)
-              : null,
-          };
-        })
-        .filter(Boolean);
-
-      setPlayers((prev) => [...prev, ...mapped]);
-    } catch {
-      alert("엑셀 업로드에 실패했어.");
+  for (let i = 0; i < teams.length; i += 1) {
+    for (let j = i + 1; j < teams.length; j += 1) {
+      const idsA = new Set(teams[i].players.map((p) => p.id));
+      if (teams[j].players.some((p) => idsA.has(p.id))) continue;
+      const evaluated = evaluator(teams[i].players, teams[j].players);
+      if (!evaluated) continue;
+      possibleMatches.push({
+        courtId: 0,
+        teamA: teams[i].players,
+        teamB: teams[j].players,
+        ...evaluated,
+        penalty: scorePreferencePenalty(meta, teams[i].players, teams[j].players, evaluated),
+      });
     }
   }
 
-  async function handleJsonImport(file) {
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text);
-      if (!Array.isArray(parsed)) {
-        alert("JSON 형식이 올바르지 않아.");
-        return;
-      }
+  return possibleMatches.sort((a, b) => a.penalty - b.penalty);
+};
 
-      const mode = window.prompt("1=기존 유지+추가 / 2=전체 교체", "1");
+const pickBestRound = (basePlayers, meta, modeValue) => {
+  const enriched = enrichPlayers(basePlayers, meta).filter((p) => p.remaining > 0);
+  if (enriched.length < 4) return [];
 
-      const imported = parsed
-        .map((p) => ({
-          id: uid(),
-          name: normalize(p.name),
-          gender: p.gender === "여" ? "여" : "남",
-          grade: GRADES.includes(p.grade) ? p.grade : "C",
-          targetGames: clamp(Number(p.targetGames) || 3, 1, 30),
-          scoreOverride:
-            p.scoreOverride === null ||
-            p.scoreOverride === undefined ||
-            p.scoreOverride === ""
-              ? null
-              : Number(p.scoreOverride),
-        }))
-        .filter((p) => p.name);
+  const ordered = shuffle(enriched).sort((a, b) => {
+    const remainingDiff = (b.maxGames - meta.playerStats[b.id].gamesPlayed) - (a.maxGames - meta.playerStats[a.id].gamesPlayed);
+    if (remainingDiff !== 0) return remainingDiff;
+    return meta.playerStats[a.id].gamesPlayed - meta.playerStats[b.id].gamesPlayed;
+  });
 
-      if (mode === "2") {
-        setPlayers(imported);
-      } else {
-        setPlayers((prev) => [...prev, ...imported]);
-      }
-    } catch {
-      alert("JSON 불러오기에 실패했어.");
+  const usedIds = new Set();
+
+  if (modeValue === "rivalry") {
+    const strictPossible = buildCandidateMatches(ordered, meta, modeValue, evaluateRivalryStrictMatch);
+    const strictSelected = selectGreedyMatches(strictPossible, usedIds);
+    strictSelected.forEach((match) => [...match.teamA, ...match.teamB].forEach((p) => usedIds.add(p.id)));
+
+    if (strictSelected.length >= TOTAL_COURTS) {
+      return strictSelected.map((m, idx) => ({ ...m, courtId: idx + 1 }));
     }
+
+    const remainPool = ordered.filter((p) => !usedIds.has(p.id));
+    const flexiblePossible = buildCandidateMatches(remainPool, meta, modeValue, evaluateRivalryFlexibleMatch);
+    const flexibleSelected = selectGreedyMatches(flexiblePossible, usedIds);
+    return [...strictSelected, ...flexibleSelected]
+      .slice(0, TOTAL_COURTS)
+      .map((m, idx) => ({ ...m, courtId: idx + 1 }));
   }
 
-  function clearAll() {
-    if (!window.confirm("선수/설정/대진표를 모두 삭제할까?")) return;
-    localStorage.removeItem(STORAGE_KEY);
-    setPlayers([]);
-    setSchedule(null);
-    setTitle(DEFAULT_TITLE);
-    setCourts(4);
-    setDefaultTargetGames(3);
-    setMaxRoundsInput("");
-    setShortagePriority(false);
-    setExpandedRounds([]);
-    setPptOrientation("landscape");
-    setMaxDiff(1.0);
-  }
+  const evaluator = modeValue === "tournament" ? evaluateTournamentMatch : evaluateFriendlyLikeMatch;
+  const possible = buildCandidateMatches(ordered, meta, modeValue, evaluator);
+  return selectGreedyMatches(possible, usedIds).map((m, idx) => ({ ...m, courtId: idx + 1 }));
+};
 
-  async function exportPpt() {
-    await exportSchedulePpt(schedule, players, {
-      title,
-      courts,
-      pptOrientation,
-    });
-  }
+const commitMatchesToMeta = (matches, meta) => {
+  matches.forEach((match) => {
+    const typeA = getTeamType(match.teamA);
+    const typeB = getTeamType(match.teamB);
 
-  function copyScheduleText() {
-    if (!schedule?.rounds?.length) return;
-    const lines = [];
-    lines.push(title || DEFAULT_TITLE);
-    lines.push(`${courts}코트 / ${schedule.rounds.length}라운드`);
-    lines.push("");
-
-    schedule.rounds.forEach((round) => {
-      lines.push(round.title);
-      round.matches.forEach((m) => {
-        const a = m.teamAIds.map((id) => playerMap.get(id)?.name || "").join(", ");
-        const b = m.teamBIds.map((id) => playerMap.get(id)?.name || "").join(", ");
-        lines.push(
-          `${m.court}코트 | ${a} VS ${b} | ${formatScore(m.scoreA)}:${formatScore(m.scoreB)} | Δ${formatScore(m.diff)}`
-        );
-      });
-      lines.push("");
+    [...match.teamA, ...match.teamB].forEach((player) => {
+      meta.playerStats[player.id].gamesPlayed += 1;
     });
 
-    navigator.clipboard.writeText(lines.join("\n"));
-    alert("대진표 텍스트를 복사했어.");
-  }
+    match.teamA.forEach((player) => {
+      meta.playerStats[player.id].sameTypeGames[typeA] += 1;
+    });
+    match.teamB.forEach((player) => {
+      meta.playerStats[player.id].sameTypeGames[typeB] += 1;
+    });
+
+    [match.teamA, match.teamB].forEach((team) => {
+      const k = pairKey(team[0].id, team[1].id);
+      meta.teamPairCounts[k] = (meta.teamPairCounts[k] || 0) + 1;
+    });
+
+    const crossPairs = [
+      [match.teamA[0].id, match.teamB[0].id],
+      [match.teamA[0].id, match.teamB[1].id],
+      [match.teamA[1].id, match.teamB[0].id],
+      [match.teamA[1].id, match.teamB[1].id],
+    ];
+    crossPairs.forEach(([a, b]) => {
+      const k = opponentKey(a, b);
+      meta.opponentCounts[k] = (meta.opponentCounts[k] || 0) + 1;
+    });
+  });
+};
+
+const getRoundPenalty = (matches) => matches.reduce((sum, m) => sum + (m.penalty || 0), 0);
+
+const Card = ({ children, style = {}, className = "" }) => (
+  <div className={className} style={{ ...styles.card, ...style }}>{children}</div>
+);
+
+const SectionCard = ({ title, right, children }) => (
+  <div style={styles.sectionCard}>
+    <div
+      style={{
+        padding: "18px 18px 14px",
+        borderBottom: "1px solid #eef2ff",
+        display: "flex",
+        gap: 12,
+        alignItems: "center",
+        justifyContent: "space-between",
+        flexWrap: "wrap",
+      }}
+    >
+      <div style={{ fontSize: 22, fontWeight: 900, color: "#1e1b4b" }}>{title}</div>
+      {right}
+    </div>
+    <div style={{ padding: 18 }}>{children}</div>
+  </div>
+);
+
+const Button = ({ children, onClick, variant = "primary", disabled = false, style = {}, type = "button" }) => {
+  const map = {
+    primary: {
+      background: "linear-gradient(135deg, #6366f1 0%, #3b82f6 100%)",
+      color: "white",
+      boxShadow: "0 10px 24px rgba(59, 130, 246, 0.24)",
+    },
+    secondary: {
+      background: "white",
+      color: "#334155",
+      border: "1px solid #cbd5e1",
+      boxShadow: "0 8px 18px rgba(15, 23, 42, 0.05)",
+    },
+    success: {
+      background: "linear-gradient(135deg, #22c55e 0%, #16a34a 100%)",
+      color: "white",
+      boxShadow: "0 10px 24px rgba(34, 197, 94, 0.20)",
+    },
+    danger: {
+      background: "linear-gradient(135deg, #ef4444 0%, #dc2626 100%)",
+      color: "white",
+      boxShadow: "0 10px 24px rgba(239, 68, 68, 0.20)",
+    },
+    excel: {
+      background: "linear-gradient(135deg, #16a34a 0%, #15803d 100%)",
+      color: "white",
+      boxShadow: "0 10px 24px rgba(34, 197, 94, 0.18)",
+    },
+    modeBack: {
+      background: "rgba(255,255,255,0.88)",
+      color: "#1f2937",
+      border: "1px solid #e2e8f0",
+      boxShadow: "0 8px 18px rgba(15,23,42,.04)",
+    },
+  };
 
   return (
-    <div className="app">
-      <style>{css}</style>
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        ...styles.button,
+        ...map[variant],
+        opacity: disabled ? 0.5 : 1,
+        cursor: disabled ? "not-allowed" : "pointer",
+        ...style,
+      }}
+    >
+      {children}
+    </button>
+  );
+};
 
-      <div className="shell">
-        <header className="header">
-          <div className="brand">
-            <div className="brand-icon">🏸</div>
-            <div>
-              <div className="brand-title">배드민턴 밸런스 매치 v14</div>
-              <div className="brand-sub">배경 겹침 해결 통합 버전</div>
-            </div>
-          </div>
-        </header>
+const Pill = ({ children, tone = "slate" }) => {
+  const toneMap = {
+    slate: { background: "#f1f5f9", color: "#334155" },
+    blue: { background: "#dbeafe", color: "#1d4ed8" },
+    pink: { background: "#fce7f3", color: "#be185d" },
+    indigo: { background: "#e0e7ff", color: "#4338ca" },
+    orange: { background: "#ffedd5", color: "#c2410c" },
+    green: { background: "#dcfce7", color: "#166534" },
+  };
+  return <span style={{ ...styles.pill, ...toneMap[tone] }}>{children}</span>;
+};
 
-        <section className="panel">
-          <div className="panel-title">설정</div>
+const Input = (props) => <input {...props} style={{ ...styles.input, ...(props.style || {}) }} />;
+const Select = ({ children, ...props }) => <select {...props} style={{ ...styles.select, ...(props.style || {}) }}>{children}</select>;
 
-          <div className="settings-grid">
-            <label className="field field-wide">
-              <span>대진표 제목</span>
-              <input
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder={DEFAULT_TITLE}
-              />
-            </label>
+function LogoPanel() {
+  return (
+    <div style={styles.brandLogoBox}>
+      <div style={styles.brandTop}>YEAR OF THE MON</div>
+      <div style={styles.brandMain}>BADMONKEYZ</div>
+      <div style={styles.brandSub}>BADMINTON</div>
+    </div>
+  );
+}
 
-            <label className="field">
-              <span>코트 수</span>
-              <input
-                type="number"
-                min={1}
-                max={10}
-                value={courts}
-                onChange={(e) =>
-                  setCourts(clamp(Number(e.target.value) || 4, 1, 10))
-                }
-              />
-            </label>
+function HomePage({ onSelectMode }) {
+  return (
+    <div style={styles.homeHero}>
+      <div style={styles.watermark}>BADMONKEYZ</div>
+      <LogoPanel />
+      <div style={styles.titleBlock}>
+        <h1 style={styles.title}>BADMONKEYZ</h1>
+        <div style={styles.subtitle}>Badminton Match System</div>
+      </div>
+      <div style={styles.lead}>
+        배드민턴 친선전 · 대회 · 대항전을 자동으로 생성하는 매치 시스템입니다.<br />
+        원하는 경기 모드를 선택해 바로 시작할 수 있습니다.
+      </div>
 
-            <label className="field">
-              <span>기본 목표경기</span>
-              <input
-                type="number"
-                min={1}
-                max={30}
-                value={defaultTargetGames}
-                onChange={(e) =>
-                  setDefaultTargetGames(clamp(Number(e.target.value) || 3, 1, 30))
-                }
-              />
-            </label>
-
-            <div className="field">
-              <span>전원 적용</span>
-              <button onClick={applyTargetToAll}>전원 적용</button>
-            </div>
-
-            <label className="field">
-              <span>최대 라운드(선택)</span>
-              <input
-                type="number"
-                min={1}
-                value={maxRoundsInput}
-                onChange={(e) => setMaxRoundsInput(e.target.value)}
-                placeholder="비우면 무제한"
-              />
-            </label>
-
-            <label className="field">
-              <span>점수차 최대(Δ)</span>
-              <input
-                type="number"
-                step="0.1"
-                value={maxDiff}
-                onChange={(e) => setMaxDiff(Number(e.target.value))}
-              />
-            </label>
-
-            <label className="field">
-              <span>혼복vs여복 gap 최소</span>
-              <input
-                type="number"
-                value={mixedVsFemaleGapMin}
-                onChange={(e) => setMixedVsFemaleGapMin(Number(e.target.value))}
-              />
-            </label>
-
-            <label className="field">
-              <span>혼복vs여복 gap 최대</span>
-              <input
-                type="number"
-                value={mixedVsFemaleGapMax}
-                onChange={(e) => setMixedVsFemaleGapMax(Number(e.target.value))}
-              />
-            </label>
-
-            <label className="field">
-              <span>PPT 방향</span>
-              <select
-                value={pptOrientation}
-                onChange={(e) => setPptOrientation(e.target.value)}
-              >
-                <option value="landscape">가로</option>
-                <option value="portrait">세로</option>
-              </select>
-            </label>
-
-            <label className="toggle">
-              <input
-                type="checkbox"
-                checked={shortagePriority}
-                onChange={(e) => setShortagePriority(e.target.checked)}
-              />
-              <span>부족자 우선 재생성</span>
-            </label>
-          </div>
-
-          <div className="toolbar">
-            <button className="primary" onClick={buildScheduleNow}>
-              대진표 생성
-            </button>
-            <button onClick={() => fileInputRef.current?.click()}>
-              엑셀 업로드
-            </button>
-            <button onClick={() => downloadPlayersJson(players)}>
-              명단 백업(JSON)
-            </button>
-            <button onClick={() => jsonInputRef.current?.click()}>
-              명단 복원(JSON)
-            </button>
-            <button className="danger" onClick={clearAll}>
-              전체삭제
-            </button>
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".xlsx,.xls"
-              hidden
-              onChange={(e) => handleExcelUpload(e.target.files?.[0])}
-            />
-            <input
-              ref={jsonInputRef}
-              type="file"
-              accept=".json"
-              hidden
-              onChange={(e) => handleJsonImport(e.target.files?.[0])}
-            />
-          </div>
-        </section>
-
-        <div className="content">
-          <section className="panel">
-            <div className="panel-title">선수 등록 / 관리</div>
-
-            <div className="add-row">
-              <input
-                className="name-input"
-                value={newPlayer.name}
-                onChange={(e) =>
-                  setNewPlayer((prev) => ({ ...prev, name: e.target.value }))
-                }
-                placeholder="이름"
-              />
-              <select
-                value={newPlayer.gender}
-                onChange={(e) =>
-                  setNewPlayer((prev) => ({ ...prev, gender: e.target.value }))
-                }
-              >
-                <option value="남">남</option>
-                <option value="여">여</option>
-              </select>
-              <select
-                value={newPlayer.grade}
-                onChange={(e) =>
-                  setNewPlayer((prev) => ({ ...prev, grade: e.target.value }))
-                }
-              >
-                {GRADES.map((g) => (
-                  <option key={g} value={g}>
-                    {g}
-                  </option>
-                ))}
-              </select>
-              <input
-                type="number"
-                min={1}
-                max={30}
-                value={newPlayer.targetGames}
-                onChange={(e) =>
-                  setNewPlayer((prev) => ({
-                    ...prev,
-                    targetGames: clamp(Number(e.target.value) || 3, 1, 30),
-                  }))
-                }
-              />
-              <button className="primary" onClick={addPlayer}>
-                추가
-              </button>
-            </div>
-
-            <div className="player-list">
-              {players.length === 0 && <div className="empty">선수가 아직 없어.</div>}
-
-              {players.map((p) => {
-                const dup = (nameCountMap.get(normalize(p.name)) || 0) > 1;
-                const assigned = assignedMap.get(p.id) || 0;
-
-                return (
-                  <div className="player-card" key={p.id}>
-                    <div className="player-top">
-                      <div className="player-name-wrap">
-                        <input
-                          className="player-name"
-                          value={p.name}
-                          onChange={(e) =>
-                            updatePlayer(p.id, { name: e.target.value })
-                          }
-                          title={p.name}
-                        />
-                        {dup && <span className="dup">⚠</span>}
-                      </div>
-
-                      <span
-                        className="grade-pill"
-                        style={{
-                          color: gradeColor(p.grade),
-                          borderColor: `${gradeColor(p.grade)}66`,
-                          backgroundColor: `${gradeColor(p.grade)}18`,
-                        }}
-                      >
-                        {p.gender} {p.grade}
-                      </span>
-
-                      <button
-                        className="icon danger"
-                        onClick={() => removePlayer(p.id)}
-                      >
-                        ✕
-                      </button>
-                    </div>
-
-                    <div className="player-bottom">
-                      <div className="mini">
-                        <span>목</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={30}
-                          value={p.targetGames}
-                          onChange={(e) =>
-                            updatePlayer(p.id, {
-                              targetGames: clamp(
-                                Number(e.target.value) || 3,
-                                1,
-                                30
-                              ),
-                            })
-                          }
-                        />
-                      </div>
-
-                      <div className="mini score-mini">
-                        <span>점</span>
-                        <input
-                          type="number"
-                          step="0.1"
-                          value={isManualScore(p) ? p.scoreOverride : getAppliedScore(p)}
-                          onChange={(e) =>
-                            updatePlayer(p.id, {
-                              scoreOverride:
-                                e.target.value === ""
-                                  ? null
-                                  : Number(e.target.value),
-                            })
-                          }
-                        />
-                        <span
-                          className={`mode ${isManualScore(p) ? "manual" : "auto"}`}
-                        >
-                          {isManualScore(p) ? "수동" : "자동"}
-                        </span>
-                        {isManualScore(p) && (
-                          <button
-                            className="icon tiny"
-                            onClick={() => resetScoreToAuto(p.id)}
-                          >
-                            ↺
-                          </button>
-                        )}
-                      </div>
-
-                      <div className="mini readonly">
-                        <span>출</span>
-                        <div>{assigned}</div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="schedule-head">
-              <div>
-                <div className="panel-title">대진표</div>
-                <div className="muted">
-                  {title || DEFAULT_TITLE} · {courts}코트 ·{" "}
-                  {schedule?.rounds?.length || 0}라운드
-                </div>
-              </div>
-
-              <div className="toolbar compact">
-                <button onClick={expandAll}>모두 펼치기</button>
-                <button onClick={collapseAll}>모두 접기</button>
-                <button onClick={copyScheduleText}>텍스트 복사</button>
-                <button
-                  onClick={() =>
-                    schedule &&
-                    exportScheduleExcel(schedule, playerMap, title || DEFAULT_TITLE)
-                  }
+      <div style={styles.modeGrid}>
+        {MODES.map((mode) => {
+          const theme = accentTheme[mode.accent];
+          const copy = MODE_COPY[mode.value];
+          return (
+            <div
+              key={mode.value}
+              style={{ ...styles.modeCard, background: theme.soft, boxShadow: theme.shadow, border: `1px solid ${theme.border}` }}
+              onClick={() => onSelectMode(mode.value)}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = "translateY(-6px)";
+                e.currentTarget.style.boxShadow = theme.shadow.replace("34px", "42px");
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = "translateY(0)";
+                e.currentTarget.style.boxShadow = theme.shadow;
+              }}
+            >
+              <div style={{ padding: 24 }}>
+                <div
+                  style={{
+                    width: 70,
+                    height: 70,
+                    borderRadius: 20,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 36,
+                    background: "rgba(255,255,255,0.78)",
+                    boxShadow: "inset 0 1px 0 rgba(255,255,255,.8)",
+                  }}
                 >
-                  엑셀 저장
-                </button>
-                <button className="primary" onClick={exportPpt}>
-                  PPT 저장
-                </button>
-              </div>
-            </div>
-
-            <div className="summary-box">
-              <div className="summary-title">출전 현황 요약</div>
-              <div className="summary-wrap">
-                <table className="summary-table">
-                  <thead>
-                    <tr>
-                      <th>이름</th>
-                      <th>목표</th>
-                      <th>배정</th>
-                      <th>차이</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {summary.map((row) => (
-                      <tr key={row.id}>
-                        <td>
-                          <span className="name-cell">
-                            <span style={{ color: gradeColor(row.grade) }}>●</span>
-                            {playerShortName(row.name)}
-                            {(nameCountMap.get(normalize(row.name)) || 0) > 1 && (
-                              <span className="dup-inline">⚠</span>
-                            )}
-                          </span>
-                        </td>
-                        <td>{row.targetGames}</td>
-                        <td>{row.assigned}</td>
-                        <td>
-                          {row.diff === 0 && <span className="ok">✅ 0</span>}
-                          {row.diff === -1 && <span className="warn">⚠ -1</span>}
-                          {row.diff <= -2 && <span className="bad">❌ {row.diff}</span>}
-                          {row.diff > 0 && <span>+{row.diff}</span>}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {!schedule?.rounds?.length ? (
-              <div className="empty">대진표를 생성해줘.</div>
-            ) : (
-              <div className="round-list">
-                {schedule.rounds.map((round) => {
-                  const opened = expandedRounds.includes(round.id);
-                  return (
-                    <div className="round-box" key={round.id}>
-                      <button
-                        className="round-toggle"
-                        onClick={() => toggleRound(round.id)}
-                      >
-                        <span>
-                          {opened ? "▼" : "▶"} {round.title}
-                        </span>
-                        <span>{round.matches.length} matches</span>
-                      </button>
-
-                      {opened && (
-                        <div className="court-grid">
-                          {round.matches.map((m) => {
-                            const teamA = m.teamAIds
-                              .map((id) => playerMap.get(id))
-                              .filter(Boolean);
-                            const teamB = m.teamBIds
-                              .map((id) => playerMap.get(id))
-                              .filter(Boolean);
-
-                            return (
-                              <div className="court-card" key={m.id}>
-                                <div className="court-top">
-                                  <div className="court-no">{m.court}코트</div>
-                                  <div className="court-type">
-                                    {m.typeA} vs {m.typeB}
-                                  </div>
-                                </div>
-
-                                <div className="diff-big">
-                                  점수차 Δ {formatScore(m.diff)}
-                                </div>
-
-                                <div className="team-card">
-                                  <div className="team-label">TEAM A</div>
-                                  <div className="team-list">
-                                    {teamA.map((p) => (
-                                      <div className="team-row" key={p.id}>
-                                        <span
-                                          className="dot"
-                                          style={{
-                                            backgroundColor: gradeColor(p.grade),
-                                          }}
-                                        />
-                                        <span className="team-name">
-                                          {scheduleName(p.name)}
-                                        </span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                  <div className="sum-big">
-                                    TEAM A {formatScore(m.scoreA)}
-                                  </div>
-                                </div>
-
-                                <div className="vs">VS</div>
-
-                                <div className="team-card">
-                                  <div className="team-label">TEAM B</div>
-                                  <div className="team-list">
-                                    {teamB.map((p) => (
-                                      <div className="team-row" key={p.id}>
-                                        <span
-                                          className="dot"
-                                          style={{
-                                            backgroundColor: gradeColor(p.grade),
-                                          }}
-                                        />
-                                        <span className="team-name">
-                                          {scheduleName(p.name)}
-                                        </span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                  <div className="sum-big">
-                                    TEAM B {formatScore(m.scoreB)}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
+                  {mode.icon}
+                </div>
+                <div style={{ marginTop: 18, fontSize: 32, fontWeight: 950, color: theme.text }}>{mode.label}</div>
+                <div style={{ marginTop: 10, color: "#475569", lineHeight: 1.7, minHeight: 70 }}>{copy.description}</div>
+                <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
+                  {copy.bullets.map((bullet) => (
+                    <div key={bullet} style={{ color: theme.text, fontWeight: 700, display: "flex", gap: 8, alignItems: "center" }}>
+                      <span>✓</span>
+                      <span>{bullet}</span>
                     </div>
-                  );
-                })}
+                  ))}
+                </div>
+                <Button
+                  variant="primary"
+                  style={{
+                    width: "100%",
+                    marginTop: 18,
+                    background: theme.button,
+                    color: theme.buttonText,
+                    boxShadow: "0 10px 24px rgba(15,23,42,.10)",
+                  }}
+                >
+                  {mode.label} 시작
+                </Button>
               </div>
-            )}
-          </section>
-        </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
 }
 
-const css = `
-:root{
-  --bg:#08111f;
-  --panel:#0f1b31;
-  --line:rgba(255,255,255,.10);
-  --text:#eaf1ff;
-  --muted:#9fb2d5;
-  --danger:#ef4444;
-}
-
-*{box-sizing:border-box}
-
-html, body, #root{
-  width:100%;
-  max-width:100%;
-  overflow-x:hidden;
-}
-
-body{
-  margin:0;
-  background:
-    radial-gradient(circle at top left, rgba(37,194,160,.10), transparent 26%),
-    radial-gradient(circle at top right, rgba(25,82,216,.12), transparent 22%),
-    var(--bg);
-  color:var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
-  overflow-x:hidden;
-}
-
-button,input,select{font:inherit}
-
-.app{
-  min-height:100vh;
-  width:100%;
-  max-width:100%;
-  overflow-x:hidden;
-}
-
-.shell{
-  width:100%;
-  max-width:1380px;
-  margin:0 auto;
-  padding:16px;
-  overflow-x:hidden;
-}
-
-.header{
-  border:1px solid var(--line);
-  background:linear-gradient(135deg, rgba(37,194,160,.10), rgba(25,82,216,.10));
-  border-radius:18px;
-  padding:16px;
-  margin-bottom:14px;
-}
-
-.brand{
-  display:flex;
-  align-items:center;
-  gap:12px;
-}
-
-.brand-icon{
-  width:44px;
-  height:44px;
-  border-radius:14px;
-  display:grid;
-  place-items:center;
-  background:rgba(37,194,160,.14);
-  border:1px solid rgba(37,194,160,.25);
-}
-
-.brand-title{font-size:28px;font-weight:900}
-.brand-sub{font-size:13px;color:var(--muted);margin-top:4px}
-
-.panel{
-  background:rgba(15,27,49,.94);
-  border:1px solid var(--line);
-  border-radius:18px;
-  padding:14px;
-  box-shadow:0 16px 40px rgba(0,0,0,.18);
-}
-
-.panel-title{
-  font-size:18px;
-  font-weight:900;
-  margin-bottom:10px;
-}
-
-.muted{
-  color:var(--muted);
-  font-size:13px;
-}
-
-.settings-grid{
-  display:grid;
-  grid-template-columns:repeat(4, minmax(0,1fr));
-  gap:10px;
-  width:100%;
-  min-width:0;
-}
-
-.field{
-  display:flex;
-  flex-direction:column;
-  gap:6px;
-}
-
-.field span{
-  font-size:12px;
-  color:var(--muted);
-}
-
-.field input,.field select{
-  border:1px solid var(--line);
-  background:#091526;
-  color:var(--text);
-  border-radius:12px;
-  padding:10px 12px;
-  width:100%;
-  min-width:0;
-}
-
-.field button{
-  border:1px solid var(--line);
-  background:#091526;
-  color:var(--text);
-  border-radius:12px;
-  padding:10px 12px;
-  cursor:pointer;
-  width:100%;
-}
-
-.field-wide{grid-column:span 2}
-
-.toggle{
-  margin-top:20px;
-  display:flex;
-  align-items:center;
-  gap:10px;
-  border:1px solid var(--line);
-  border-radius:12px;
-  background:#091526;
-  padding:10px 12px;
-  min-height:44px;
-  min-width:0;
-}
-
-.toolbar{
-  display:flex;
-  flex-wrap:wrap;
-  gap:8px;
-  margin-top:12px;
-  width:100%;
-}
-
-.toolbar.compact{
-  margin-top:0;
-}
-
-.toolbar button{
-  border:1px solid var(--line);
-  background:#091526;
-  color:var(--text);
-  border-radius:12px;
-  padding:10px 12px;
-  cursor:pointer;
-  min-width:0;
-}
-
-.toolbar button.primary{
-  background:linear-gradient(135deg, rgba(37,194,160,.18), rgba(25,82,216,.18));
-  border-color:rgba(37,194,160,.28);
-}
-
-.toolbar button.danger{
-  background:rgba(239,68,68,.10);
-  border-color:rgba(239,68,68,.32);
-}
-
-.content{
-  display:grid;
-  grid-template-columns:minmax(320px, 420px) minmax(0, 1fr);
-  gap:14px;
-  margin-top:14px;
-  width:100%;
-  min-width:0;
-}
-
-.add-row{
-  display:grid;
-  grid-template-columns:minmax(0,1fr) 70px 82px 82px 80px;
-  gap:8px;
-  margin-bottom:12px;
-  width:100%;
-  min-width:0;
-}
-
-.add-row input,.add-row select,.add-row button{
-  border:1px solid var(--line);
-  background:#091526;
-  color:var(--text);
-  border-radius:12px;
-  padding:10px 12px;
-  min-width:0;
-}
-
-.add-row button.primary{
-  background:linear-gradient(135deg, rgba(37,194,160,.18), rgba(25,82,216,.18));
-  border-color:rgba(37,194,160,.28);
-}
-
-.name-input{min-width:0}
-
-.player-list{
-  display:flex;
-  flex-direction:column;
-  gap:10px;
-  min-width:0;
-}
-
-.player-card{
-  border:1px solid var(--line);
-  background:#0b172b;
-  border-radius:14px;
-  padding:10px;
-  min-width:0;
-}
-
-.player-top,.player-bottom{
-  display:flex;
-  align-items:center;
-  gap:8px;
-}
-
-.player-bottom{
-  margin-top:8px;
-  flex-wrap:wrap;
-}
-
-.player-name-wrap{
-  display:flex;
-  align-items:center;
-  gap:6px;
-  flex:1;
-  min-width:0;
-}
-
-.player-name{
-  width:6ch;
-  max-width:6ch;
-  min-width:6ch;
-  border:1px solid var(--line);
-  background:#091526;
-  color:var(--text);
-  border-radius:10px;
-  padding:8px 10px;
-  overflow:hidden;
-  white-space:nowrap;
-}
-
-.dup{color:#fbbf24;font-weight:900}
-.dup-inline{color:#fbbf24}
-
-.grade-pill{
-  border:1px solid;
-  border-radius:999px;
-  padding:7px 10px;
-  font-weight:800;
-  white-space:nowrap;
-  font-size:12px;
-}
-
-.icon{
-  border:1px solid var(--line);
-  background:#091526;
-  color:var(--text);
-  border-radius:10px;
-  padding:7px 10px;
-  cursor:pointer;
-}
-
-.icon.danger{
-  background:rgba(239,68,68,.10);
-  border-color:rgba(239,68,68,.32);
-}
-
-.icon.tiny{
-  padding:5px 8px;
-  font-size:12px;
-}
-
-.mini{
-  display:flex;
-  align-items:center;
-  gap:6px;
-  min-width:0;
-}
-
-.mini > span{
-  font-size:12px;
-  color:var(--muted);
-  min-width:16px;
-}
-
-.mini input{
-  width:4.2ch;
-  border:1px solid var(--line);
-  background:#091526;
-  color:var(--text);
-  border-radius:10px;
-  padding:7px 8px;
-  text-align:center;
-}
-
-.score-mini input{width:5.5ch}
-
-.mode{
-  font-size:11px;
-  padding:5px 7px;
-  border-radius:999px;
-  font-weight:800;
-}
-
-.mode.auto{
-  background:rgba(37,194,160,.12);
-  color:#7ee4cf;
-}
-
-.mode.manual{
-  background:rgba(245,158,11,.16);
-  color:#fbbf24;
-}
-
-.readonly div{
-  min-width:28px;
-  border:1px solid var(--line);
-  background:#091526;
-  border-radius:10px;
-  padding:7px 8px;
-  text-align:center;
-}
-
-.schedule-head{
-  display:flex;
-  justify-content:space-between;
-  align-items:flex-start;
-  gap:12px;
-  margin-bottom:12px;
-}
-
-.summary-box{
-  border:1px solid var(--line);
-  background:#0b172b;
-  border-radius:14px;
-  padding:12px;
-  margin-bottom:12px;
-  min-width:0;
-}
-
-.summary-title{font-weight:900;margin-bottom:8px}
-
-.summary-wrap{
-  overflow-x:auto;
-  max-width:100%;
-}
-
-.summary-table{
-  width:100%;
-  min-width:380px;
-  border-collapse:collapse;
-}
-
-.summary-table th,.summary-table td{
-  padding:8px 10px;
-  border-bottom:1px solid rgba(255,255,255,.06);
-  text-align:left;
-  font-size:13px;
-}
-
-.summary-table th{color:var(--muted)}
-
-.name-cell{
-  display:inline-flex;
-  align-items:center;
-  gap:4px;
-}
-
-.ok{color:#86efac;font-weight:800}
-.warn{color:#fbbf24;font-weight:800}
-.bad{color:#f87171;font-weight:800}
-
-.round-list{
-  display:flex;
-  flex-direction:column;
-  gap:12px;
-  min-width:0;
-}
-
-.round-box{
-  border:1px solid var(--line);
-  background:#0b172b;
-  border-radius:16px;
-  overflow:hidden;
-  min-width:0;
-}
-
-.round-toggle{
-  width:100%;
-  border:none;
-  background:linear-gradient(90deg, rgba(37,194,160,.10), rgba(25,82,216,.08));
-  color:var(--text);
-  padding:12px 14px;
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  font-weight:900;
-  cursor:pointer;
-}
-
-.court-grid{
-  display:grid;
-  grid-template-columns:1fr;
-  gap:12px;
-  padding:12px;
-  min-width:0;
-}
-
-.court-card{
-  border:1px solid var(--line);
-  background:
-    radial-gradient(circle at top left, rgba(25,82,216,.15), transparent 30%),
-    #091526;
-  border-radius:16px;
-  padding:12px;
-  min-width:0;
-}
-
-.court-top{
-  display:flex;
-  align-items:center;
-  gap:8px;
-  margin-bottom:10px;
-  flex-wrap:wrap;
-}
-
-.court-no{
-  background:rgba(37,194,160,.15);
-  border:1px solid rgba(37,194,160,.32);
-  color:#7ee4cf;
-  border-radius:999px;
-  padding:6px 10px;
-  font-weight:900;
-}
-
-.court-type{
-  font-size:12px;
-  color:var(--muted);
-}
-
-.diff-big{
-  margin-bottom:12px;
-  padding:10px 12px;
-  border-radius:14px;
-  background:linear-gradient(135deg, rgba(109,40,217,.22), rgba(124,58,237,.10));
-  border:1px solid rgba(196,181,253,.35);
-  color:#ddd6fe;
-  font-weight:900;
-  font-size:20px;
-  text-align:center;
-}
-
-.team-card{
-  border:1px solid var(--line);
-  background:rgba(255,255,255,.03);
-  border-radius:14px;
-  padding:10px;
-}
-
-.team-label{
-  font-size:12px;
-  color:var(--muted);
-  font-weight:900;
-  margin-bottom:6px;
-}
-
-.team-list{
-  display:flex;
-  flex-direction:column;
-  gap:6px;
-}
-
-.team-row{
-  display:flex;
-  align-items:flex-start;
-  gap:8px;
-}
-
-.dot{
-  width:10px;
-  height:10px;
-  border-radius:999px;
-  margin-top:4px;
-  flex:0 0 auto;
-}
-
-.team-name{
-  white-space:pre-line;
-  line-height:1.15;
-  font-weight:900;
-  font-size:18px;
-}
-
-.vs{
-  text-align:center;
-  color:var(--muted);
-  font-weight:900;
-  margin:10px 0;
-  letter-spacing:1px;
-}
-
-.sum-big{
-  margin-top:10px;
-  font-size:20px;
-  font-weight:900;
-}
-
-.empty{
-  color:var(--muted);
-  text-align:center;
-  padding:20px;
-}
-
-.panel,
-.settings-grid,
-.add-row,
-.player-list,
-.summary-box,
-.round-list,
-.round-box,
-.court-grid,
-.court-card{
-  min-width:0;
-}
-
-input, select, button{
-  max-width:100%;
-}
-
-@media (max-width: 960px){
-  .shell{
-    padding:10px;
+function useResponsive() {
+  const [mobile, setMobile] = useState(() => (typeof window !== "undefined" ? window.innerWidth < 768 : false));
+  useEffect(() => {
+    const onResize = () => setMobile(window.innerWidth < 768);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return mobile;
+}
+
+function App() {
+  const isMobile = useResponsive();
+  const [players, setPlayers] = useState([]);
+  const [schedule, setSchedule] = useState([]);
+  const [activeTab, setActiveTab] = useState("players");
+  const [mode, setMode] = useState("friendly");
+  const [homeMode, setHomeMode] = useState(true);
+  const [playerForm, setPlayerForm] = useState(emptyPlayerForm);
+  const [message, setMessage] = useState("");
+  const [uploadSummary, setUploadSummary] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+
+  const scheduleRef = useRef(null);
+  const uploadInputRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      const savedPlayers = localStorage.getItem(STORAGE_KEY_PLAYERS);
+      const savedMode = localStorage.getItem(STORAGE_KEY_MODE);
+      const savedHome = localStorage.getItem(STORAGE_KEY_HOME);
+      if (savedPlayers) {
+        const parsed = JSON.parse(savedPlayers);
+        if (Array.isArray(parsed)) {
+          setPlayers(parsed.map((p, idx) => makePlayer(p.id ?? idx + 1, p)).filter((p) => p.name));
+        }
+      }
+      if (savedMode && MODES.some((m) => m.value === savedMode)) setMode(savedMode);
+      if (savedHome !== null) setHomeMode(savedHome === "true");
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_PLAYERS, JSON.stringify(players));
+  }, [players]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_MODE, mode);
+  }, [mode]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_HOME, String(homeMode));
+  }, [homeMode]);
+
+  useEffect(() => {
+    setSchedule([]);
+    setActiveTab("players");
+    setUploadSummary(null);
+    setMessage("");
+  }, [mode]);
+
+  const playersWithLiveScore = useMemo(() => players.map((p) => ({ ...p, liveScore: getPlayerScore(p) })), [players]);
+  const nextId = useMemo(() => (players.length ? Math.max(...players.map((p) => p.id)) + 1 : 1), [players]);
+  const modeTheme = accentTheme[MODES.find((m) => m.value === mode)?.accent || "blue"];
+  const modeInfo = MODE_COPY[mode];
+
+  const countByGender = useCallback((gender) => players.filter((p) => p.gender === gender).length, [players]);
+  const countByTeam = useCallback((team) => players.filter((p) => p.team === team).length, [players]);
+
+  const theoreticalRounds = useMemo(() => {
+    const totalGames = players.reduce((sum, p) => sum + Number(p.maxGames || 0), 0);
+    const totalMatches = Math.floor(totalGames / 4);
+    return Math.floor(totalMatches / TOTAL_COURTS);
+  }, [players]);
+
+  const changeGenderInForm = (gender) => {
+    setPlayerForm((prev) => ({
+      ...prev,
+      gender,
+      events: normalizeEventsByGender(gender, prev.events),
+    }));
+  };
+
+  const updatePlayerField = (id, patch) => {
+    setPlayers((prev) =>
+      prev.map((p) => {
+        if (p.id !== id) return p;
+        const merged = { ...p, ...patch };
+        if (patch.gender && patch.gender !== p.gender) {
+          merged.events = normalizeEventsByGender(patch.gender, merged.events);
+        }
+        return makePlayer(id, merged);
+      })
+    );
+  };
+
+  const addPlayer = () => {
+    const trimmedName = playerForm.name.trim();
+    if (!trimmedName) {
+      setMessage("선수 이름을 입력해 주세요.");
+      return;
+    }
+    if (players.some((p) => p.name === trimmedName)) {
+      setMessage(`'${trimmedName}' 선수는 이미 등록되어 있습니다.`);
+      return;
+    }
+
+    const candidate = makePlayer(nextId, {
+      ...playerForm,
+      name: trimmedName,
+      customScore: playerForm.customScore === "" ? null : playerForm.customScore,
+    });
+
+    setPlayers((prev) => [...prev, candidate]);
+    setPlayerForm((prev) => ({
+      ...emptyPlayerForm,
+      gender: prev.gender,
+      grade: prev.grade,
+      team: prev.team,
+      events: normalizeEventsByGender(prev.gender, prev.events),
+    }));
+    setMessage(`선수 '${candidate.name}' 등록 완료`);
+  };
+
+  const deletePlayer = (id) => {
+    setPlayers((prev) => prev.filter((p) => p.id !== id));
+    setSchedule([]);
+  };
+
+  const resetAllPlayers = () => {
+    if (!window.confirm("등록된 선수 전체를 삭제할까요?")) return;
+    setPlayers([]);
+    setSchedule([]);
+    setMessage("전체 선수 목록이 초기화되었습니다.");
+  };
+
+  const triggerExcelUpload = () => uploadInputRef.current?.click();
+
+  const downloadTemplate = () => {
+    const rows = [
+      {
+        이름: "김철수",
+        성별: "남",
+        급수: "B",
+        목표경기: 3,
+        커스텀점수: "",
+        소속팀: "홈팀",
+        남복참가: "Y",
+        여복참가: "",
+        혼복참가: "",
+      },
+      {
+        이름: "이영희",
+        성별: "여",
+        급수: "C",
+        목표경기: 3,
+        커스텀점수: "",
+        소속팀: "원정팀",
+        남복참가: "",
+        여복참가: "Y",
+        혼복참가: "Y",
+      },
+    ];
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = [
+      { wch: 14 },
+      { wch: 8 },
+      { wch: 8 },
+      { wch: 10 },
+      { wch: 12 },
+      { wch: 10 },
+      { wch: 10 },
+      { wch: 10 },
+      { wch: 10 },
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "선수등록예시");
+    XLSX.writeFile(wb, `BADMONKEYZ_선수등록_예시_${getKoreanDateString()}.xlsx`);
+  };
+
+  const parseTruthy = (value) => ["y", "yes", "1", "true", "o", "참가"].includes(String(value ?? "").trim().toLowerCase());
+
+  const handleExcelUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadSummary(null);
+
+    try {
+      const data = await file.arrayBuffer();
+      const wb = XLSX.read(data);
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+
+      let currentId = nextId;
+      const success = [];
+      const failures = [];
+      const existingNames = new Set(players.map((p) => p.name));
+      const newNames = new Set();
+
+      rows.forEach((row, idx) => {
+        const rowNo = idx + 2;
+        const name = String(row.이름 ?? row.name ?? "").trim();
+        const gender = String(row.성별 ?? row.gender ?? "").trim();
+        const grade = String(row.급수 ?? row.grade ?? "").trim();
+        const maxGamesRaw = row.목표경기 ?? row.maxGames ?? row["목표 경기"];
+        const customScoreRaw = row.커스텀점수 ?? row.customScore ?? "";
+        const team = String(row.소속팀 ?? row.team ?? "홈팀").trim() || "홈팀";
+        const nam = parseTruthy(row.남복참가 ?? row.nam ?? "");
+        const yeo = parseTruthy(row.여복참가 ?? row.yeo ?? "");
+        const hon = parseTruthy(row.혼복참가 ?? row.hon ?? "");
+
+        if (!name) return failures.push({ rowNo, reason: "이름이 비어 있습니다." });
+        if (existingNames.has(name) || newNames.has(name)) return failures.push({ rowNo, reason: "중복된 이름입니다." });
+        if (!GENDERS.includes(gender)) return failures.push({ rowNo, reason: "성별은 남 또는 여여야 합니다." });
+        if (!GRADES.includes(grade)) return failures.push({ rowNo, reason: "급수는 A/B/C/D/초심 중 하나여야 합니다." });
+
+        const maxGames = Number(maxGamesRaw);
+        if (!Number.isFinite(maxGames) || maxGames < 1 || maxGames > MAX_GAMES) {
+          return failures.push({ rowNo, reason: `목표경기는 1~${MAX_GAMES} 사이 숫자여야 합니다.` });
+        }
+
+        if (
+          !(customScoreRaw === "" || customScoreRaw === null || customScoreRaw === undefined) &&
+          !Number.isFinite(Number(customScoreRaw))
+        ) {
+          return failures.push({ rowNo, reason: "커스텀점수는 비우거나 숫자여야 합니다." });
+        }
+
+        if (!TEAMS.includes(team)) return failures.push({ rowNo, reason: "소속팀은 홈팀/원정팀이어야 합니다." });
+
+        const candidate = makePlayer(currentId++, {
+          name,
+          gender,
+          grade,
+          maxGames,
+          customScore: customScoreRaw === "" ? null : Number(customScoreRaw),
+          team,
+          events: normalizeEventsByGender(gender, { nam, yeo, hon }),
+        });
+        newNames.add(name);
+        success.push(candidate);
+      });
+
+      if (success.length) setPlayers((prev) => [...prev, ...success]);
+      setUploadSummary({
+        total: rows.length,
+        success: success.length,
+        failed: failures.length,
+        failures: failures.slice(0, 5),
+      });
+      setMessage(`엑셀 등록 완료: 성공 ${success.length}건 / 실패 ${failures.length}건`);
+    } catch (err) {
+      console.error(err);
+      setMessage("엑셀 업로드 중 오류가 발생했습니다.");
+    } finally {
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
+
+  const generateSchedule = () => {
+    if (players.length < 4) {
+      setMessage("최소 4명 이상 등록해야 합니다.");
+      return;
+    }
+
+    try {
+      const meta = buildMeta(playersWithLiveScore);
+      const rounds = [];
+
+      for (let roundNo = 1; roundNo <= MAX_TOTAL_ROUNDS_SOFT; roundNo += 1) {
+        let bestMatches = [];
+        let bestPenalty = Infinity;
+
+        for (let tryCount = 0; tryCount < MAX_ROUND_TRIES; tryCount += 1) {
+          const result = pickBestRound(shuffle(playersWithLiveScore), meta, mode);
+          const penalty = getRoundPenalty(result);
+          if (
+            result.length > bestMatches.length ||
+            (result.length === bestMatches.length && penalty < bestPenalty)
+          ) {
+            bestMatches = result;
+            bestPenalty = penalty;
+          }
+          if (bestMatches.length >= TOTAL_COURTS && bestPenalty <= 20) break;
+        }
+
+        if (!bestMatches.length) break;
+        commitMatchesToMeta(bestMatches, meta);
+        rounds.push({ id: roundNo, matches: bestMatches });
+
+        const completed = playersWithLiveScore.every((p) => meta.playerStats[p.id].gamesPlayed >= p.maxGames);
+        if (completed) break;
+      }
+
+      setSchedule(rounds);
+      setActiveTab("schedule");
+
+      const unmetCount = playersWithLiveScore.filter((p) => meta.playerStats[p.id].gamesPlayed < p.maxGames).length;
+
+      if (!rounds.length) {
+        setMessage("대진을 생성하지 못했습니다. 인원, 성별, 급수, 참가종목, 소속팀 조건을 확인해 주세요.");
+      } else if (unmetCount > 0) {
+        setMessage(`대진 생성 완료 (${rounds.length}R). 일부 선수는 목표경기를 모두 채우지 못했습니다.`);
+      } else {
+        setMessage(`대진 생성 완료 (${rounds.length}R)`);
+      }
+    } catch (e) {
+      console.error(e);
+      setMessage("대진 생성 중 오류가 발생했습니다.");
+    }
+  };
+
+  const downloadExcel = () => {
+    if (!schedule.length) {
+      window.alert("생성된 대진표가 없습니다.");
+      return;
+    }
+
+    const rows = [];
+    schedule.forEach((round) => {
+      round.matches.forEach((match) => {
+        rows.push({
+          모드: MODES.find((m) => m.value === mode)?.label,
+          라운드: `${round.id}R`,
+          코트: `${match.courtId}코트`,
+          경기유형: match.matchLabel,
+          팀A: `${match.teamA[0].name} / ${match.teamA[1].name}`,
+          팀B: `${match.teamB[0].name} / ${match.teamB[1].name}`,
+          팀A합점: match.scoreA.toFixed(1),
+          팀B합점: match.scoreB.toFixed(1),
+          점수차: match.diff.toFixed(1),
+        });
+      });
+      rows.push({});
+    });
+
+    const ws = XLSX.utils.json_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "대진표");
+    XLSX.writeFile(wb, `BADMONKEYZ_대진표_${getKoreanDateString()}.xlsx`);
+  };
+
+  const downloadScheduleImage = async () => {
+    if (!scheduleRef.current) return;
+    try {
+      const node = scheduleRef.current;
+      const dataUrl = await toPng(node, {
+        cacheBust: true,
+        pixelRatio: 2.5,
+        backgroundColor: "#f8fafc",
+        skipFonts: false,
+        width: node.scrollWidth,
+        height: node.scrollHeight,
+        canvasWidth: node.scrollWidth,
+        canvasHeight: node.scrollHeight,
+      });
+      const link = document.createElement("a");
+      link.download = `BADMONKEYZ_대진표_${getKoreanDateString()}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (e) {
+      console.error(e);
+      setMessage("이미지 저장 중 오류가 발생했습니다.");
+    }
+  };
+
+  const modeAllows = {
+    team: mode === "rivalry",
+    events: mode === "tournament",
+  };
+
+  const renderEventChecks = (player, onChange, compact = false) => {
+    const items = [
+      { key: "nam", label: "남복", disabled: player.gender !== "남" },
+      { key: "yeo", label: "여복", disabled: player.gender !== "여" },
+      { key: "hon", label: "혼복", disabled: false },
+    ];
+
+    return (
+      <div style={{ display: "flex", gap: compact ? 12 : 16, flexWrap: "wrap", fontSize: compact ? 13 : 12 }}>
+        {items.map((item) => (
+          <label key={item.key} style={{ display: "inline-flex", gap: 6, alignItems: "center", opacity: item.disabled ? 0.45 : 1 }}>
+            <input
+              type="checkbox"
+              checked={!!player.events[item.key]}
+              disabled={item.disabled}
+              onChange={(e) => onChange(item.key, e.target.checked)}
+            />
+            <span>{item.label}</span>
+          </label>
+        ))}
+      </div>
+    );
+  };
+
+  const headerSummary = (
+    <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
+      <Pill tone="indigo">현재 모드: {MODES.find((m) => m.value === mode)?.label}</Pill>
+      <Pill tone="slate">인원 {players.length}명</Pill>
+      <Pill tone="blue">남 {countByGender("남")}명</Pill>
+      <Pill tone="pink">여 {countByGender("여")}명</Pill>
+      {mode === "rivalry" && (
+        <>
+          <Pill tone="orange">홈팀 {countByTeam("홈팀")}명</Pill>
+          <Pill tone="orange">원정팀 {countByTeam("원정팀")}명</Pill>
+        </>
+      )}
+      <Pill tone="green">이론상 최대 {theoreticalRounds}R</Pill>
+    </div>
+  );
+
+  if (homeMode) {
+    return (
+      <div style={styles.page}>
+        <div style={styles.container}>
+          <HomePage
+            onSelectMode={(value) => {
+              setMode(value);
+              setHomeMode(false);
+            }}
+          />
+        </div>
+      </div>
+    );
   }
 
-  .brand-title{
-    font-size:18px;
-    line-height:1.2;
-    word-break:keep-all;
-  }
+  return (
+    <div style={styles.page}>
+      <div style={styles.container}>
+        <input ref={uploadInputRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={handleExcelUpload} />
 
-  .brand-sub{
-    font-size:12px;
-  }
+        <div
+          style={{
+            ...Card,
+            borderRadius: 30,
+            overflow: "hidden",
+            background: "rgba(255,255,255,0.92)",
+            boxShadow: "0 16px 48px rgba(30, 41, 59, 0.10)",
+            marginBottom: 18,
+          }}
+        >
+          <div
+            style={{
+              position: "relative",
+              overflow: "hidden",
+              borderRadius: 30,
+              background: `linear-gradient(135deg, rgba(255,255,255,.95) 0%, rgba(255,255,255,.80) 100%)`,
+              padding: isMobile ? 18 : 26,
+            }}
+          >
+            <div style={{ position: "absolute", right: -20, top: -10, fontSize: isMobile ? 90 : 160, fontWeight: 900, color: "rgba(79,70,229,.04)" }}>
+              BAD
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: isMobile ? "flex-start" : "center", flexWrap: "wrap", position: "relative" }}>
+              <div>
+                <Button variant="modeBack" onClick={() => setHomeMode(true)} style={{ marginBottom: 16 }}>
+                  ← HOME
+                </Button>
+                <div style={{ fontSize: isMobile ? 16 : 18, fontWeight: 900, color: modeTheme.text }}>🐵🏸 BADMONKEYZ</div>
+                <div style={{ marginTop: 4, fontSize: isMobile ? 28 : 40, fontWeight: 950, color: "#1e1b4b", lineHeight: 1.05 }}>{modeInfo.title}</div>
+                <div style={{ marginTop: 8, color: "#475569", fontWeight: 700 }}>{modeInfo.short}</div>
+                {headerSummary}
+              </div>
+              {!isMobile && (
+                <div
+                  style={{
+                    minWidth: 250,
+                    borderRadius: 26,
+                    padding: 18,
+                    background: modeTheme.soft,
+                    border: `1px solid ${modeTheme.border}`,
+                    boxShadow: "inset 0 1px 0 rgba(255,255,255,.85)",
+                  }}
+                >
+                  <div style={{ fontSize: 30 }}>{MODES.find((m) => m.value === mode)?.icon}</div>
+                  <div style={{ marginTop: 10, fontWeight: 900, fontSize: 18, color: modeTheme.text }}>{MODES.find((m) => m.value === mode)?.label}</div>
+                  <div style={{ marginTop: 8, color: "#475569", lineHeight: 1.7 }}>{modeInfo.description}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
 
-  .settings-grid{
-    grid-template-columns:1fr;
-    gap:10px;
-  }
+        {message && (
+          <div
+            style={{
+              ...styles.card,
+              marginBottom: 16,
+              background: "linear-gradient(135deg, #eff6ff 0%, #eef2ff 100%)",
+              border: "1px solid #dbeafe",
+              padding: "14px 16px",
+              color: "#1d4ed8",
+              fontWeight: 700,
+            }}
+          >
+            {message}
+          </div>
+        )}
 
-  .field-wide{
-    grid-column:span 1;
-  }
+        <div style={{ display: "flex", justifyContent: "center", marginBottom: 18 }}>
+          <div
+            style={{
+              display: "inline-flex",
+              gap: 8,
+              padding: 8,
+              borderRadius: 22,
+              background: "rgba(255,255,255,0.86)",
+              border: "1px solid rgba(255,255,255,0.95)",
+              boxShadow: "0 12px 28px rgba(15, 23, 42, .06)",
+              flexWrap: "wrap",
+            }}
+          >
+            <button
+              onClick={() => setActiveTab("players")}
+              style={{
+                ...styles.button,
+                background: activeTab === "players" ? modeTheme.button : "transparent",
+                color: activeTab === "players" ? "white" : "#475569",
+                minWidth: isMobile ? 140 : 180,
+              }}
+            >
+              선수 관리 ({players.length})
+            </button>
+            <button
+              onClick={() => setActiveTab("schedule")}
+              style={{
+                ...styles.button,
+                background: activeTab === "schedule" ? modeTheme.button : "transparent",
+                color: activeTab === "schedule" ? "white" : "#475569",
+                minWidth: isMobile ? 140 : 180,
+              }}
+            >
+              대진표 ({schedule.length}R)
+            </button>
+          </div>
+        </div>
 
-  .content{
-    grid-template-columns:1fr;
-    gap:12px;
-  }
+        {activeTab === "players" && (
+          <div style={{ display: "grid", gap: 18 }}>
+            <SectionCard
+              title="선수 등록"
+              right={
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <Button variant="excel" onClick={downloadTemplate}>📄 템플릿</Button>
+                  <Button variant="secondary" onClick={triggerExcelUpload}>📥 엑셀 불러오기</Button>
+                </div>
+              }
+            >
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: isMobile ? "1fr" : "repeat(12, 1fr)",
+                  gap: 14,
+                }}
+              >
+                <div style={{ gridColumn: isMobile ? undefined : "span 3" }}>
+                  <label style={styles.label}>이름</label>
+                  <Input
+                    value={playerForm.name}
+                    placeholder="이름 입력"
+                    onChange={(e) => setPlayerForm((prev) => ({ ...prev, name: e.target.value }))}
+                    onKeyDown={(e) => e.key === "Enter" && addPlayer()}
+                  />
+                </div>
+                <div style={{ gridColumn: isMobile ? undefined : "span 2" }}>
+                  <label style={styles.label}>성별</label>
+                  <Select value={playerForm.gender} onChange={(e) => changeGenderInForm(e.target.value)}>
+                    {GENDERS.map((g) => (
+                      <option key={g} value={g}>{g}</option>
+                    ))}
+                  </Select>
+                </div>
+                <div style={{ gridColumn: isMobile ? undefined : "span 2" }}>
+                  <label style={styles.label}>급수</label>
+                  <Select value={playerForm.grade} onChange={(e) => setPlayerForm((prev) => ({ ...prev, grade: e.target.value }))}>
+                    {GRADES.map((g) => (
+                      <option key={g} value={g}>{g}</option>
+                    ))}
+                  </Select>
+                </div>
+                <div style={{ gridColumn: isMobile ? undefined : "span 2" }}>
+                  <label style={styles.label}>목표경기</label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={MAX_GAMES}
+                    value={playerForm.maxGames}
+                    onChange={(e) =>
+                      setPlayerForm((prev) => ({
+                        ...prev,
+                        maxGames: clampInt(Number(e.target.value || DEFAULT_MAX_GAMES), 1, MAX_GAMES),
+                      }))
+                    }
+                  />
+                </div>
+                <div style={{ gridColumn: isMobile ? undefined : "span 3" }}>
+                  <label style={styles.label}>커스텀점수 (선택)</label>
+                  <Input
+                    type="number"
+                    step="0.1"
+                    placeholder="비우면 기본점수"
+                    value={playerForm.customScore}
+                    onChange={(e) => setPlayerForm((prev) => ({ ...prev, customScore: e.target.value }))}
+                  />
+                </div>
 
-  .schedule-head{
-    flex-direction:column;
-  }
+                {modeAllows.team && (
+                  <div style={{ gridColumn: isMobile ? undefined : "span 3" }}>
+                    <label style={styles.label}>소속팀 (대항전용)</label>
+                    <Select value={playerForm.team} onChange={(e) => setPlayerForm((prev) => ({ ...prev, team: e.target.value }))}>
+                      {TEAMS.map((t) => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </Select>
+                  </div>
+                )}
 
-  .toolbar{
-    width:100%;
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:8px;
-  }
+                {modeAllows.events && (
+                  <div style={{ gridColumn: isMobile ? undefined : "span 6" }}>
+                    <label style={styles.label}>참가종목 (대회 모드용)</label>
+                    <div style={{ borderRadius: 18, border: "1px solid #dbeafe", background: "#f8fbff", padding: "13px 14px" }}>
+                      {renderEventChecks(
+                        playerForm,
+                        (key, checked) =>
+                          setPlayerForm((prev) => ({
+                            ...prev,
+                            events: normalizeEventsByGender(prev.gender, { ...prev.events, [key]: checked }),
+                          })),
+                        true
+                      )}
+                    </div>
+                  </div>
+                )}
 
-  .toolbar.compact{
-    width:100%;
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:8px;
-  }
+                <div style={{ gridColumn: isMobile ? undefined : modeAllows.events || modeAllows.team ? "span 3" : "span 2", display: "flex", alignItems: "end" }}>
+                  <Button variant="success" onClick={addPlayer} style={{ width: "100%", minHeight: 48 }}>➕ 선수 추가</Button>
+                </div>
+              </div>
+            </SectionCard>
 
-  .toolbar button,
-  .toolbar.compact button{
-    width:100%;
-    min-width:0;
-    padding:10px 8px;
-    font-size:14px;
-  }
+            <SectionCard
+              title={`선수 목록 (${players.length}명)`}
+              right={
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <Button onClick={generateSchedule}>🚀 대진표 생성</Button>
+                  <Button variant="secondary" onClick={() => setActiveTab("schedule")}>🏆 결과 보기</Button>
+                  <Button variant="danger" onClick={resetAllPlayers}>🗑 전체 초기화</Button>
+                </div>
+              }
+            >
+              {uploadSummary && (
+                <div
+                  style={{
+                    marginBottom: 14,
+                    borderRadius: 18,
+                    background: "#ecfdf5",
+                    border: "1px solid #bbf7d0",
+                    padding: "12px 14px",
+                    color: "#166534",
+                    fontSize: 14,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  총 {uploadSummary.total}행 / 성공 {uploadSummary.success}행 / 실패 {uploadSummary.failed}행
+                  {uploadSummary.failures?.length > 0 && (
+                    <div style={{ marginTop: 6, fontSize: 13 }}>
+                      {uploadSummary.failures.map((f, idx) => (
+                        <div key={idx}>- {f.rowNo}행: {f.reason}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
-  .add-row{
-    grid-template-columns:1fr 1fr;
-  }
+              {!isMobile ? (
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: 0, minWidth: 900 }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", fontSize: 12, color: "#64748b" }}>
+                        {[
+                          "이름",
+                          "성별",
+                          "급수",
+                          "기본점수",
+                          "커스텀점수",
+                          "적용점수",
+                          "목표경기",
+                          ...(modeAllows.team ? ["소속팀"] : []),
+                          ...(modeAllows.events ? ["참가종목"] : []),
+                          "삭제",
+                        ].map((head) => (
+                          <th key={head} style={{ padding: "12px 10px", borderBottom: "1px solid #eef2ff" }}>{head}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {playersWithLiveScore.map((p) => (
+                        <tr key={p.id}>
+                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9", fontWeight: 900 }}>{p.name}</td>
+                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
+                            <Pill tone={p.gender === "남" ? "blue" : "pink"}>{p.gender}</Pill>
+                          </td>
+                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>{p.grade}</td>
+                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9", color: "#64748b" }}>{getBaseScore(p.grade, p.gender)}</td>
+                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
+                            <Input
+                              type="number"
+                              step="0.1"
+                              style={{ width: 92 }}
+                              value={p.customScore ?? ""}
+                              onChange={(e) => updatePlayerField(p.id, { customScore: e.target.value === "" ? null : Number(e.target.value) })}
+                            />
+                          </td>
+                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9", fontWeight: 900 }}>{p.liveScore}</td>
+                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
+                            <Input
+                              type="number"
+                              min={1}
+                              max={MAX_GAMES}
+                              style={{ width: 90 }}
+                              value={p.maxGames}
+                              onChange={(e) => updatePlayerField(p.id, { maxGames: clampInt(Number(e.target.value || DEFAULT_MAX_GAMES), 1, MAX_GAMES) })}
+                            />
+                          </td>
+                          {modeAllows.team && (
+                            <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
+                              <Select value={p.team} onChange={(e) => updatePlayerField(p.id, { team: e.target.value })}>
+                                {TEAMS.map((t) => (
+                                  <option key={t} value={t}>{t}</option>
+                                ))}
+                              </Select>
+                            </td>
+                          )}
+                          {modeAllows.events && (
+                            <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
+                              {renderEventChecks(p, (key, checked) =>
+                                updatePlayerField(p.id, {
+                                  events: normalizeEventsByGender(p.gender, { ...p.events, [key]: checked }),
+                                })
+                              )}
+                            </td>
+                          )}
+                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
+                            <button onClick={() => deletePlayer(p.id)} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 20, color: "#94a3b8" }}>✕</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div style={{ display: "grid", gap: 12 }}>
+                  {playersWithLiveScore.map((p) => {
+                    const expanded = editingId === p.id;
+                    return (
+                      <div key={p.id} style={{ borderRadius: 22, border: "1px solid #e2e8f0", padding: 16, background: "white", boxShadow: "0 10px 24px rgba(15,23,42,.04)" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+                          <div>
+                            <div style={{ fontSize: 22, fontWeight: 900 }}>{p.name}</div>
+                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                              <Pill tone={p.gender === "남" ? "blue" : "pink"}>{p.gender}</Pill>
+                              <Pill tone="indigo">{p.grade}급</Pill>
+                              {modeAllows.team && <Pill tone="orange">{p.team}</Pill>}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <button onClick={() => setEditingId(expanded ? null : p.id)} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 18 }}>✏️</button>
+                            <button onClick={() => deletePlayer(p.id)} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 18 }}>🗑</button>
+                          </div>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, marginTop: 14 }}>
+                          <div style={{ borderRadius: 16, background: "#f8fafc", padding: 12 }}>
+                            <div style={{ color: "#64748b", fontSize: 12, fontWeight: 700 }}>적용점수</div>
+                            <div style={{ marginTop: 4, fontSize: 20, fontWeight: 900 }}>{p.liveScore}</div>
+                          </div>
+                          <div style={{ borderRadius: 16, background: "#f8fafc", padding: 12 }}>
+                            <div style={{ color: "#64748b", fontSize: 12, fontWeight: 700 }}>목표경기</div>
+                            <div style={{ marginTop: 4, fontSize: 20, fontWeight: 900 }}>{p.maxGames}회</div>
+                          </div>
+                        </div>
+                        {expanded && (
+                          <div style={{ marginTop: 14, display: "grid", gap: 12, borderTop: "1px solid #eef2ff", paddingTop: 14 }}>
+                            <div>
+                              <label style={styles.label}>커스텀점수</label>
+                              <Input type="number" step="0.1" value={p.customScore ?? ""} onChange={(e) => updatePlayerField(p.id, { customScore: e.target.value === "" ? null : Number(e.target.value) })} />
+                            </div>
+                            <div>
+                              <label style={styles.label}>목표경기</label>
+                              <Input type="number" min={1} max={MAX_GAMES} value={p.maxGames} onChange={(e) => updatePlayerField(p.id, { maxGames: clampInt(Number(e.target.value || DEFAULT_MAX_GAMES), 1, MAX_GAMES) })} />
+                            </div>
+                            {modeAllows.team && (
+                              <div>
+                                <label style={styles.label}>소속팀</label>
+                                <Select value={p.team} onChange={(e) => updatePlayerField(p.id, { team: e.target.value })}>
+                                  {TEAMS.map((t) => (
+                                    <option key={t} value={t}>{t}</option>
+                                  ))}
+                                </Select>
+                              </div>
+                            )}
+                            {modeAllows.events && (
+                              <div>
+                                <label style={styles.label}>참가종목</label>
+                                {renderEventChecks(p, (key, checked) =>
+                                  updatePlayerField(p.id, { events: normalizeEventsByGender(p.gender, { ...p.events, [key]: checked }) }), true
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </SectionCard>
+          </div>
+        )}
 
-  .add-row .name-input{
-    grid-column:1 / -1;
-  }
+        {activeTab === "schedule" && (
+          <div style={{ display: "grid", gap: 18 }}>
+            {!schedule.length ? (
+              <div style={{ ...styles.sectionCard, padding: "34px 18px", textAlign: "center" }}>
+                <div style={{ fontSize: 28 }}>🐵</div>
+                <div style={{ marginTop: 10, fontSize: 20, fontWeight: 900, color: "#334155" }}>생성된 대진표가 없습니다.</div>
+                <div style={{ marginTop: 8, color: "#64748b" }}>먼저 선수 등록 후 대진표를 생성해 주세요.</div>
+                <div style={{ marginTop: 18 }}>
+                  <Button variant="secondary" onClick={() => setActiveTab("players")}>선수 관리로 이동</Button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <SectionCard
+                  title="매칭 결과"
+                  right={
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <Button onClick={generateSchedule}>🔄 재생성</Button>
+                      <Button variant="excel" onClick={downloadExcel}>📊 엑셀 저장</Button>
+                      <Button variant="secondary" onClick={downloadScheduleImage}>🖼 이미지 저장</Button>
+                    </div>
+                  }
+                >
+                  <div style={{ color: "#475569", fontWeight: 700 }}>
+                    BADMONKEYZ {MODES.find((m) => m.value === mode)?.label} / 총 {schedule.length}R
+                  </div>
+                </SectionCard>
 
-  .add-row button{
-    grid-column:1 / -1;
-  }
+                <div ref={scheduleRef} style={{ display: "grid", gap: 16 }}>
+                  {schedule.map((round) => (
+                    <div key={round.id} style={{ ...styles.sectionCard, overflow: "hidden" }}>
+                      <div style={{ background: "linear-gradient(135deg, #0f172a 0%, #334155 100%)", color: "white", padding: "14px 18px", display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+                        <div style={{ fontSize: 22, fontWeight: 900 }}>ROUND {round.id}</div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <div style={{ fontSize: 24 }}>🐵🐷🐯🐰</div>
+                          <Pill tone="slate">{round.matches.length} matches</Pill>
+                        </div>
+                      </div>
 
-  .panel{
-    padding:12px;
-  }
+                      <div style={{ padding: 14, display: "grid", gap: 14, gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))" }}>
+                        {round.matches.map((match, idx) => {
+                          const titleA = mode === "rivalry" ? match.teamA[0].team : "TEAM A";
+                          const titleB = mode === "rivalry" ? match.teamB[0].team : "TEAM B";
+                          return (
+                            <div key={idx} style={{ borderRadius: 24, border: "1px solid #e2e8f0", background: "linear-gradient(180deg, #ffffff 0%, #f8fafc 100%)", padding: 14, boxShadow: "0 10px 24px rgba(15,23,42,.04)" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                                <Pill tone="indigo">{match.courtId}코트</Pill>
+                                <Pill tone="slate">{match.matchLabel}</Pill>
+                              </div>
+                              <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+                                <div style={{ borderRadius: 18, border: "1px solid #bfdbfe", background: "#eff6ff", padding: 12 }}>
+                                  <div style={{ fontSize: 12, color: "#1d4ed8", fontWeight: 800 }}>{titleA}</div>
+                                  {match.teamA.map((p) => (
+                                    <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0", fontSize: 14 }}>
+                                      <div style={{ fontWeight: 800 }}>{p.name}</div>
+                                      <div style={{ color: "#475569" }}>{p.gender}/{p.grade} ({p.score})</div>
+                                    </div>
+                                  ))}
+                                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #bfdbfe", textAlign: "right", fontWeight: 900, color: "#1d4ed8" }}>합계 {match.scoreA.toFixed(1)}</div>
+                                </div>
 
-  .player-name{
-    width:5.5ch;
-    min-width:5.5ch;
-    max-width:5.5ch;
-  }
+                                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10 }}>
+                                  <div style={{ fontSize: 24, fontWeight: 950, color: "#94a3b8" }}>VS</div>
+                                  <Pill tone={Math.abs(match.diff) < 0.0001 ? "indigo" : "green"}>
+                                    {Math.abs(match.diff) < 0.0001 ? "Perfect" : `${match.diff.toFixed(1)}차`}
+                                  </Pill>
+                                </div>
 
-  .court-grid{
-    grid-template-columns:1fr;
-  }
-
-  .court-card{
-    padding:10px;
-  }
-
-  .team-name{
-    font-size:16px;
-  }
-
-  .sum-big{
-    font-size:18px;
-  }
-
-  .diff-big{
-    font-size:18px;
-    padding:8px 10px;
-  }
+                                <div style={{ borderRadius: 18, border: "1px solid #fecdd3", background: "#fff1f2", padding: 12 }}>
+                                  <div style={{ fontSize: 12, color: "#be123c", fontWeight: 800 }}>{titleB}</div>
+                                  {match.teamB.map((p) => (
+                                    <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0", fontSize: 14 }}>
+                                      <div style={{ fontWeight: 800 }}>{p.name}</div>
+                                      <div style={{ color: "#475569" }}>{p.gender}/{p.grade} ({p.score})</div>
+                                    </div>
+                                  ))}
+                                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #fecdd3", textAlign: "right", fontWeight: 900, color: "#be123c" }}>합계 {match.scoreB.toFixed(1)}</div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
-@media (min-width: 961px){
-  .court-grid{
-    grid-template-columns:1fr 1fr;
-  }
-}
-`;
+export default App;
