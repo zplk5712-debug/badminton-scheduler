@@ -1,269 +1,81 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { toPng } from "html-to-image";
 
 const GRADES = ["A", "B", "C", "D", "초심"];
 const GENDERS = ["남", "여"];
+const AGE_BANDS = ["20대", "30대", "40대", "50대", "60대+"];
 const MODES = [
-  { value: "friendly", label: "친선전", icon: "🏸", accent: "blue" },
-  { value: "tournament", label: "대회", icon: "🏆", accent: "purple" },
-  { value: "rivalry", label: "대항전", icon: "⚔️", accent: "orange" },
+  { value: "friendly", label: "친선전", icon: "🏸" },
+  { value: "tournament", label: "대회", icon: "🏆" },
+  { value: "rivalry", label: "대항전", icon: "⚔️" },
+  { value: "league", label: "정기전", icon: "👥" },
 ];
-const TEAMS = ["홈팀", "원정팀"];
-
-const STORAGE_KEY_PLAYERS = "badmonkeyz_scheduler_v10_players";
-const STORAGE_KEY_MODE = "badmonkeyz_scheduler_v10_mode";
-const STORAGE_KEY_HOME = "badmonkeyz_scheduler_v10_home";
-
-const MALE_POINTS = { A: 5, B: 4, C: 3, D: 2, 초심: 1 };
-const FEMALE_POINTS = { A: 3.8, B: 2.5, C: 2.0, D: 1.5, 초심: 0.5 };
-
+const RIVALRY_TEAMS = ["홈팀", "원정팀"];
+const STORAGE_KEY = "badmonkeyz_all_in_one_v31";
 const TOTAL_COURTS = 4;
-const MAX_GAMES = 20;
 const DEFAULT_MAX_GAMES = 3;
-const MAX_DIFF_SAME_TYPE = 1.0;
-const MAX_TOTAL_ROUNDS_SOFT = 60;
-const MAX_ROUND_TRIES = 220;
 
-const CROSS_TYPE_RULES = {
-  HON_YEO: { minGap: 1.0, stronger: "YEO" },
-  HON_NAM: { minGap: 1.5, stronger: "HON" },
-  NAM_YEO: { minGap: 2.0, stronger: "YEO" },
-};
+const GRADE_POINTS_MALE = { A: 5, B: 4, C: 3, D: 2, 초심: 1 };
+const GRADE_POINTS_FEMALE = { A: 3.8, B: 2.5, C: 2.0, D: 1.5, 초심: 0.5 };
+const GRADE_LEVEL = { 초심: 1, D: 2, C: 3, B: 4, A: 5 };
+const LEVEL_TO_GRADE = { 1: "초심", 2: "D", 3: "C", 4: "B", 5: "A" };
+const AGE_INDEX = { "20대": 0, "30대": 1, "40대": 2, "50대": 3, "60대+": 4 };
 
-const EVENT_DEFAULTS_BY_GENDER = {
-  남: { nam: true, yeo: false, hon: false },
-  여: { nam: false, yeo: true, hon: false },
-};
-
-const MODE_COPY = {
-  friendly: {
-    title: "친선전 매치 생성",
-    short: "실력 점수 기반 밸런스 자동 매칭",
-    description: "실력 점수를 기준으로 밸런스가 맞는 복식 경기를 자동으로 생성합니다.",
-    bullets: ["점수 밸런스 매칭", "혼복 · 남복 · 여복 자동 조합"],
-  },
-  tournament: {
-    title: "대회 대진표 생성",
-    short: "급수와 참가 종목 기준 매칭",
-    description: "급수와 참가 종목을 기준으로 경기 대진표를 생성합니다.",
-    bullets: ["급수 기준 경기", "남복 · 여복 · 혼복 설정"],
-  },
-  rivalry: {
-    title: "대항전 매치 생성",
-    short: "홈팀 vs 원정팀 팀 대결 매칭",
-    description: "홈팀과 원정팀 방식으로 팀 대결 대진표를 공정하게 생성합니다.",
-    bullets: ["팀 기반 매칭", "홈팀 · 원정팀 밸런스"],
-  },
-};
-
-const emptyPlayerForm = {
+const emptyForm = {
   name: "",
   gender: "남",
   grade: "C",
+  ageBand: "40대",
   maxGames: DEFAULT_MAX_GAMES,
   customScore: "",
-  team: "홈팀",
+  rivalryTeam: "홈팀",
   events: { nam: true, yeo: false, hon: false },
 };
 
 const styles = {
   page: {
     minHeight: "100vh",
-    background: "linear-gradient(180deg, #f8fafc 0%, #eef2ff 45%, #f8fafc 100%)",
-    color: "#172554",
-    fontFamily:
-      "Inter, Pretendard, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    background: "linear-gradient(180deg,#f8fafc 0%,#eef2ff 40%,#f8fafc 100%)",
+    color: "#0f172a",
+    fontFamily: "Inter, Pretendard, system-ui, sans-serif",
+    padding: 16,
   },
-  container: {
-    width: "min(1180px, calc(100% - 24px))",
-    margin: "0 auto",
-    padding: "24px 0 44px",
-  },
-  homeHero: {
-    position: "relative",
-    overflow: "hidden",
-    borderRadius: 32,
-    background: "rgba(255,255,255,0.92)",
-    border: "1px solid rgba(255,255,255,0.9)",
-    boxShadow: "0 18px 60px rgba(51, 65, 85, 0.12)",
-    padding: "32px 18px 28px",
-  },
-  watermark: {
-    position: "absolute",
-    inset: 0,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: "clamp(72px, 18vw, 220px)",
-    fontWeight: 900,
-    letterSpacing: 4,
-    color: "rgba(79, 70, 229, 0.04)",
-    pointerEvents: "none",
-    userSelect: "none",
-  },
-  brandLogoBox: {
-    width: "min(520px, 92%)",
-    margin: "0 auto 8px",
-    padding: "16px 20px",
-    borderRadius: 28,
-    background: "linear-gradient(135deg, #111827 0%, #1f2937 100%)",
-    color: "white",
-    boxShadow: "0 20px 40px rgba(15, 23, 42, 0.22)",
-    textAlign: "center",
-  },
-  brandTop: {
-    fontSize: "clamp(13px, 2vw, 18px)",
-    fontWeight: 800,
-    letterSpacing: 2,
-    color: "rgba(255,255,255,0.75)",
-  },
-  brandMain: {
-    marginTop: 6,
-    fontSize: "clamp(32px, 7vw, 68px)",
-    fontWeight: 900,
-    letterSpacing: 2,
-    lineHeight: 0.95,
-  },
-  brandSub: {
-    marginTop: 8,
-    fontSize: "clamp(16px, 2.4vw, 24px)",
-    fontWeight: 800,
-    letterSpacing: 1,
-    color: "#f59e0b",
-  },
-  titleBlock: { textAlign: "center", marginTop: 18, position: "relative", zIndex: 1 },
-  title: {
-    margin: 0,
-    fontSize: "clamp(34px, 6vw, 56px)",
-    lineHeight: 1,
-    fontWeight: 950,
-    background: "linear-gradient(135deg, #1e1b4b 0%, #4338ca 55%, #7c3aed 100%)",
-    WebkitBackgroundClip: "text",
-    backgroundClip: "text",
-    color: "transparent",
-  },
-  subtitle: {
-    marginTop: 8,
-    fontSize: "clamp(16px, 2.6vw, 24px)",
-    color: "#334155",
-    fontWeight: 800,
-  },
-  lead: {
-    margin: "14px auto 0",
-    width: "min(760px, 92%)",
-    fontSize: "clamp(14px, 2.2vw, 18px)",
-    color: "#475569",
-    lineHeight: 1.7,
-    textAlign: "center",
-    position: "relative",
-    zIndex: 1,
-  },
-  modeGrid: {
-    marginTop: 30,
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-    gap: 18,
-    position: "relative",
-    zIndex: 1,
-  },
+  shell: { maxWidth: 1280, margin: "0 auto" },
   card: {
-    borderRadius: 28,
-    background: "rgba(255,255,255,0.94)",
-    border: "1px solid rgba(255,255,255,0.95)",
-    boxShadow: "0 14px 35px rgba(15, 23, 42, 0.08)",
-  },
-  modeCard: {
-    borderRadius: 28,
-    overflow: "hidden",
-    background: "rgba(255,255,255,0.98)",
-    border: "1px solid rgba(255,255,255,0.98)",
-    boxShadow: "0 16px 36px rgba(15, 23, 42, 0.10)",
-    cursor: "pointer",
-    transition: "transform .18s ease, box-shadow .18s ease",
-  },
-  sectionCard: {
-    borderRadius: 28,
-    background: "rgba(255,255,255,0.94)",
-    border: "1px solid rgba(255,255,255,0.95)",
-    boxShadow: "0 14px 35px rgba(15, 23, 42, 0.08)",
-    overflow: "hidden",
-  },
-  button: {
-    border: "none",
-    cursor: "pointer",
-    borderRadius: 16,
-    padding: "12px 16px",
-    fontWeight: 800,
-    fontSize: 15,
-    transition: "all .15s ease",
+    background: "rgba(255,255,255,0.95)",
+    border: "1px solid #e2e8f0",
+    borderRadius: 24,
+    boxShadow: "0 14px 34px rgba(15,23,42,.06)",
   },
   input: {
     width: "100%",
-    borderRadius: 16,
-    border: "1px solid #dbeafe",
-    background: "#f8fbff",
-    padding: "12px 14px",
-    fontSize: 15,
-    color: "#0f172a",
+    padding: "10px 12px",
+    borderRadius: 14,
+    border: "1px solid #cbd5e1",
+    background: "#fff",
     outline: "none",
     boxSizing: "border-box",
   },
-  select: {
-    width: "100%",
-    borderRadius: 16,
-    border: "1px solid #dbeafe",
-    background: "#f8fbff",
-    padding: "12px 14px",
-    fontSize: 15,
-    color: "#0f172a",
-    outline: "none",
-    boxSizing: "border-box",
-  },
-  label: { display: "block", fontSize: 12, fontWeight: 800, color: "#64748b", marginBottom: 8 },
-  pill: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
-    borderRadius: 999,
-    padding: "8px 12px",
-    fontSize: 12,
+  button: {
+    border: "none",
+    borderRadius: 14,
+    padding: "10px 14px",
     fontWeight: 800,
+    cursor: "pointer",
   },
+  th: { textAlign: "left", padding: "10px 8px", fontSize: 12, color: "#64748b", borderBottom: "1px solid #e2e8f0" },
+  td: { padding: "10px 8px", borderBottom: "1px solid #f1f5f9", verticalAlign: "top" },
 };
 
-const accentTheme = {
-  blue: {
-    soft: "linear-gradient(135deg, #e0f2fe 0%, #eef6ff 100%)",
-    shadow: "0 18px 34px rgba(59, 130, 246, 0.14)",
-    border: "#dbeafe",
-    text: "#1d4ed8",
-    button: "linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%)",
-    buttonText: "#fff",
-  },
-  purple: {
-    soft: "linear-gradient(135deg, #ede9fe 0%, #f5f3ff 100%)",
-    shadow: "0 18px 34px rgba(124, 58, 237, 0.15)",
-    border: "#e9d5ff",
-    text: "#6d28d9",
-    button: "linear-gradient(135deg, #a78bfa 0%, #8b5cf6 100%)",
-    buttonText: "#fff",
-  },
-  orange: {
-    soft: "linear-gradient(135deg, #ffedd5 0%, #fff7ed 100%)",
-    shadow: "0 18px 34px rgba(249, 115, 22, 0.16)",
-    border: "#fed7aa",
-    text: "#c2410c",
-    button: "linear-gradient(135deg, #fb923c 0%, #f97316 100%)",
-    buttonText: "#fff",
-  },
+const cn = (...items) => items.filter(Boolean).join(" ");
+const clamp = (n, min, max) => Math.max(min, Math.min(max, Number.isFinite(Number(n)) ? Number(n) : min));
+const deepCopy = (v) => JSON.parse(JSON.stringify(v));
+const dateStamp = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
-
-const clampInt = (v, min, max) => Math.max(min, Math.min(max, Math.trunc(v)));
-const deepClone = (v) => JSON.parse(JSON.stringify(v));
 const pairKey = (a, b) => [a, b].sort((x, y) => x - y).join("_");
-const opponentKey = (a, b) => [a, b].sort((x, y) => x - y).join("_");
-
 const shuffle = (arr) => {
   const copy = [...arr];
   for (let i = copy.length - 1; i > 0; i -= 1) {
@@ -272,975 +84,876 @@ const shuffle = (arr) => {
   }
   return copy;
 };
+const typeLabel = (type) => ({ NAM: "남복", YEO: "여복", HON: "혼복", MIX: "복식" }[type] || type);
 
-const getKoreanDateString = () => {
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const dd = String(now.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-};
-
-const normalizeEventsByGender = (gender, events) => {
-  const base = deepClone(EVENT_DEFAULTS_BY_GENDER[gender]);
-  if (!events) return base;
-  if (gender === "남") return { nam: !!events.nam, yeo: false, hon: !!events.hon };
-  return { nam: false, yeo: !!events.yeo, hon: !!events.hon };
-};
-
-const makePlayer = (id, raw) => {
+function getBaseScore(grade, gender) {
+  return gender === "남" ? GRADE_POINTS_MALE[grade] : GRADE_POINTS_FEMALE[grade];
+}
+function getPlayerScore(player) {
+  return player.customScore === null || player.customScore === "" || player.customScore === undefined
+    ? getBaseScore(player.grade, player.gender)
+    : Number(player.customScore);
+}
+function normalizeEventsByGender(gender, events) {
+  if (gender === "남") return { nam: !!events?.nam, yeo: false, hon: !!events?.hon };
+  return { nam: false, yeo: !!events?.yeo, hon: !!events?.hon };
+}
+function makePlayer(id, raw) {
   const gender = raw.gender === "여" ? "여" : "남";
   const grade = GRADES.includes(raw.grade) ? raw.grade : "C";
-  const maxGames = clampInt(Number(raw.maxGames) || DEFAULT_MAX_GAMES, 1, MAX_GAMES);
-  const customScore =
-    raw.customScore === "" || raw.customScore === null || raw.customScore === undefined
-      ? null
-      : Number.isFinite(Number(raw.customScore))
-      ? Number(raw.customScore)
-      : null;
-
+  const ageBand = AGE_BANDS.includes(raw.ageBand) ? raw.ageBand : "40대";
+  const maxGames = clamp(raw.maxGames || DEFAULT_MAX_GAMES, 1, 20);
+  const parsed = raw.customScore === "" || raw.customScore === null || raw.customScore === undefined ? null : Number(raw.customScore);
   return {
     id,
     name: String(raw.name || "").trim(),
     gender,
     grade,
+    ageBand,
     maxGames,
-    customScore,
-    team: TEAMS.includes(raw.team) ? raw.team : "홈팀",
-    events: normalizeEventsByGender(gender, raw.events),
+    customScore: Number.isFinite(parsed) ? parsed : null,
+    rivalryTeam: RIVALRY_TEAMS.includes(raw.rivalryTeam) ? raw.rivalryTeam : "홈팀",
+    events: normalizeEventsByGender(gender, raw.events || (gender === "남" ? { nam: true, hon: false } : { yeo: true, hon: false })),
+    leagueManualPool: !!raw.leagueManualPool,
+    leagueTargetTeam: raw.leagueTargetTeam || "",
+    fixedPartnerId: raw.fixedPartnerId || null,
   };
-};
-
-const getBaseScore = (grade, gender) => (gender === "남" ? MALE_POINTS[grade] : FEMALE_POINTS[grade]);
-const getPlayerScore = (player) =>
-  typeof player.customScore === "number" && Number.isFinite(player.customScore)
-    ? player.customScore
-    : getBaseScore(player.grade, player.gender);
-
-const getTeamType = (team) => {
+}
+function getTeamType(team) {
   const maleCount = team.filter((p) => p.gender === "남").length;
   if (maleCount === 2) return "NAM";
   if (maleCount === 1) return "HON";
   return "YEO";
-};
+}
+function parseTruthy(v) {
+  return ["y", "yes", "1", "true", "o", "예", "참가", "ㅇ", "on"].includes(String(v ?? "").trim().toLowerCase());
+}
+function normalizeHeaderKey(v) {
+  return String(v ?? "").replace(/\s+/g, "").trim().toLowerCase();
+}
+function gradeShiftByAge(sourceAge, targetAge, grade) {
+  const baseLevel = GRADE_LEVEL[grade] ?? 3;
+  const source = AGE_INDEX[sourceAge] ?? 2;
+  const target = AGE_INDEX[targetAge] ?? 2;
+  const shifted = clamp(baseLevel + (target - source), 1, 5);
+  return LEVEL_TO_GRADE[shifted];
+}
+function adjustedScoreForTargetAge(player, targetAge) {
+  const shiftedGrade = gradeShiftByAge(player.ageBand, targetAge, player.grade);
+  return player.gender === "남" ? GRADE_POINTS_MALE[shiftedGrade] : GRADE_POINTS_FEMALE[shiftedGrade];
+}
+function eventAllowed(player, type) {
+  if (type === "NAM") return player.gender === "남" && player.events.nam;
+  if (type === "YEO") return player.gender === "여" && player.events.yeo;
+  if (type === "HON") return player.events.hon;
+  return true;
+}
 
-const typeLabel = (type) => ({ NAM: "남복", YEO: "여복", HON: "혼복" }[type] || type);
-
-const teamAllowedByEvents = (team, modeValue) => {
-  if (modeValue !== "tournament") return true;
-  const type = getTeamType(team);
-  if (type === "NAM") return team.every((p) => p.gender === "남" && p.events.nam);
-  if (type === "YEO") return team.every((p) => p.gender === "여" && p.events.yeo);
-  return (
-    team.length === 2 &&
-    team.some((p) => p.gender === "남") &&
-    team.some((p) => p.gender === "여") &&
-    team.every((p) => p.events.hon)
-  );
-};
-
-const eventKeyForCrossType = (typeA, typeB) => [typeA, typeB].sort().join("_");
-
-const buildMeta = (basePlayers) => {
-  const playerStats = {};
-  const teamPairCounts = {};
-  const opponentCounts = {};
-  basePlayers.forEach((p) => {
-    playerStats[p.id] = {
-      gamesPlayed: 0,
-      sameTypeGames: { NAM: 0, YEO: 0, HON: 0 },
-    };
-  });
-  return { playerStats, teamPairCounts, opponentCounts };
-};
-
-const enrichPlayers = (basePlayers, meta) =>
-  basePlayers.map((p) => ({
-    ...p,
-    score: getPlayerScore(p),
-    gamesPlayed: meta.playerStats[p.id]?.gamesPlayed ?? 0,
-    remaining: p.maxGames - (meta.playerStats[p.id]?.gamesPlayed ?? 0),
-  }));
-
-const evaluateFriendlyLikeMatch = (teamA, teamB) => {
-  const scoreA = teamA.reduce((s, p) => s + p.score, 0);
-  const scoreB = teamB.reduce((s, p) => s + p.score, 0);
-  const typeA = getTeamType(teamA);
-  const typeB = getTeamType(teamB);
-  const diff = Math.abs(scoreA - scoreB);
-
-  if (typeA === typeB) {
-    if (diff > MAX_DIFF_SAME_TYPE) return null;
-    return {
-      typeA,
-      typeB,
-      scoreA,
-      scoreB,
-      diff,
-      matchLabel: `${typeLabel(typeA)} vs ${typeLabel(typeB)}`,
-      basePenalty: diff * 10,
-    };
-  }
-
-  const key = eventKeyForCrossType(typeA, typeB);
-  const rule = CROSS_TYPE_RULES[key];
-  if (!rule) return null;
-
-  const strongerScore = rule.stronger === typeA ? scoreA : scoreB;
-  const weakerScore = rule.stronger === typeA ? scoreB : scoreA;
-  if (strongerScore - weakerScore < rule.minGap) return null;
-
-  let basePenalty = 200;
-  if (key === "HON_YEO") basePenalty = 100;
-  if (key === "HON_NAM") basePenalty = 160;
-  if (key === "NAM_YEO") basePenalty = 220;
-
-  return {
-    typeA,
-    typeB,
-    scoreA,
-    scoreB,
-    diff,
-    matchLabel: `${typeLabel(typeA)} vs ${typeLabel(typeB)}`,
-    basePenalty: basePenalty + Math.abs(strongerScore - weakerScore - rule.minGap) * 8,
-  };
-};
-
-const evaluateTournamentMatch = (teamA, teamB) => {
-  const typeA = getTeamType(teamA);
-  const typeB = getTeamType(teamB);
-  if (typeA !== typeB) return null;
-  if (![...teamA, ...teamB].every((p) => p.grade === teamA[0].grade)) return null;
-  if (!teamAllowedByEvents(teamA, "tournament") || !teamAllowedByEvents(teamB, "tournament")) return null;
-
-  const scoreA = teamA.reduce((s, p) => s + p.score, 0);
-  const scoreB = teamB.reduce((s, p) => s + p.score, 0);
-  const diff = Math.abs(scoreA - scoreB);
-  if (diff > MAX_DIFF_SAME_TYPE) return null;
-
-  return {
-    typeA,
-    typeB,
-    scoreA,
-    scoreB,
-    diff,
-    matchLabel: `${teamA[0].grade}급 ${typeLabel(typeA)}`,
-    basePenalty: diff * 10,
-  };
-};
-
-const evaluateRivalryStrictMatch = (teamA, teamB) => {
-  const teamNameA = teamA[0].team;
-  const teamNameB = teamB[0].team;
-  if (teamNameA === teamNameB) return null;
-  if (!teamA.every((p) => p.team === teamNameA) || !teamB.every((p) => p.team === teamNameB)) return null;
-
-  const typeA = getTeamType(teamA);
-  const typeB = getTeamType(teamB);
-  if (typeA !== typeB) return null;
-  if (![...teamA, ...teamB].every((p) => p.grade === teamA[0].grade)) return null;
-
-  const scoreA = teamA.reduce((s, p) => s + p.score, 0);
-  const scoreB = teamB.reduce((s, p) => s + p.score, 0);
-  const diff = Math.abs(scoreA - scoreB);
-  if (diff > MAX_DIFF_SAME_TYPE) return null;
-
-  return {
-    typeA,
-    typeB,
-    scoreA,
-    scoreB,
-    diff,
-    matchLabel: `${teamA[0].grade}급 ${typeLabel(typeA)} (${teamNameA} vs ${teamNameB})`,
-    basePenalty: diff * 10,
-  };
-};
-
-const evaluateRivalryFlexibleMatch = (teamA, teamB) => {
-  const teamNameA = teamA[0].team;
-  const teamNameB = teamB[0].team;
-  if (teamNameA === teamNameB) return null;
-  if (!teamA.every((p) => p.team === teamNameA) || !teamB.every((p) => p.team === teamNameB)) return null;
-
-  const base = evaluateFriendlyLikeMatch(teamA, teamB);
-  if (!base) return null;
-
-  const all = [...teamA, ...teamB];
-  const gradePenalty = new Set(all.map((p) => p.grade)).size === 1 ? 0 : 80;
-  return {
-    ...base,
-    matchLabel: `${base.matchLabel} (${teamNameA} vs ${teamNameB})`,
-    basePenalty: base.basePenalty + gradePenalty,
-  };
-};
-
-const scorePreferencePenalty = (meta, teamA, teamB, evaluated) => {
-  let penalty = evaluated.basePenalty;
-  const allPlayers = [...teamA, ...teamB];
-
-  allPlayers.forEach((player) => {
-    const st = meta.playerStats[player.id];
-    penalty += st.gamesPlayed * 16;
-    penalty -= Math.max(0, player.maxGames - st.gamesPlayed) * 5;
-  });
-
-  const teamAType = getTeamType(teamA);
-  const teamBType = getTeamType(teamB);
-  teamA.forEach((p) => {
-    penalty += meta.playerStats[p.id].sameTypeGames[teamAType] * 2;
-  });
-  teamB.forEach((p) => {
-    penalty += meta.playerStats[p.id].sameTypeGames[teamBType] * 2;
-  });
-
-  [teamA, teamB].forEach((team) => {
-    const key = pairKey(team[0].id, team[1].id);
-    penalty += (meta.teamPairCounts[key] || 0) * 35;
-  });
-
-  const crossPairs = [
-    [teamA[0].id, teamB[0].id],
-    [teamA[0].id, teamB[1].id],
-    [teamA[1].id, teamB[0].id],
-    [teamA[1].id, teamB[1].id],
-  ];
-  crossPairs.forEach(([a, b]) => {
-    penalty += (meta.opponentCounts[opponentKey(a, b)] || 0) * 8;
-  });
-
-  return penalty;
-};
-
-const buildTeamCandidates = (pool, modeValue) => {
-  const teams = [];
+function buildCandidateMatches(pool, mode) {
+  const matches = [];
+  const usedPairs = new Set();
   for (let i = 0; i < pool.length; i += 1) {
     for (let j = i + 1; j < pool.length; j += 1) {
-      const team = [pool[i], pool[j]];
-      if (modeValue === "tournament" && !teamAllowedByEvents(team, modeValue)) continue;
-      if (modeValue === "rivalry") {
-        const teamNames = new Set(team.map((p) => p.team));
-        if (teamNames.size !== 1) continue;
+      for (let k = 0; k < pool.length; k += 1) {
+        if (k === i || k === j) continue;
+        for (let l = k + 1; l < pool.length; l += 1) {
+          if ([i, j].includes(l)) continue;
+          const ids = [pool[i].id, pool[j].id, pool[k].id, pool[l].id].sort((a, b) => a - b).join("_");
+          if (usedPairs.has(ids)) continue;
+          usedPairs.add(ids);
+          const teamA = [pool[i], pool[j]];
+          const teamB = [pool[k], pool[l]];
+          const typeA = getTeamType(teamA);
+          const typeB = getTeamType(teamB);
+          if (mode === "tournament") {
+            if (typeA !== typeB) continue;
+            const sameGrade = [...teamA, ...teamB].every((p) => p.grade === teamA[0].grade);
+            if (!sameGrade) continue;
+            if (typeA === "NAM" && !teamA.concat(teamB).every((p) => p.events.nam)) continue;
+            if (typeA === "YEO" && !teamA.concat(teamB).every((p) => p.events.yeo)) continue;
+            if (typeA === "HON" && !teamA.concat(teamB).every((p) => p.events.hon)) continue;
+          }
+          if (mode === "rivalry") {
+            const teamNameA = new Set(teamA.map((p) => p.rivalryTeam));
+            const teamNameB = new Set(teamB.map((p) => p.rivalryTeam));
+            if (teamNameA.size !== 1 || teamNameB.size !== 1) continue;
+            if (teamA[0].rivalryTeam === teamB[0].rivalryTeam) continue;
+          }
+          const scoreA = teamA.reduce((s, p) => s + getPlayerScore(p), 0);
+          const scoreB = teamB.reduce((s, p) => s + getPlayerScore(p), 0);
+          const diff = Math.abs(scoreA - scoreB);
+          if (typeA === typeB && diff > 1.0) continue;
+          if (typeA !== typeB && mode !== "friendly") continue;
+          matches.push({
+            teamA,
+            teamB,
+            typeA,
+            typeB,
+            scoreA,
+            scoreB,
+            diff,
+            label:
+              mode === "tournament"
+                ? `${teamA[0].grade}급 ${typeLabel(typeA)}`
+                : mode === "rivalry"
+                ? `${typeLabel(typeA)} ${teamA[0].rivalryTeam} vs ${teamB[0].rivalryTeam}`
+                : `${typeLabel(typeA)} vs ${typeLabel(typeB)}`,
+            penalty: diff * 10,
+          });
+        }
       }
-      teams.push({
-        players: team,
-        type: getTeamType(team),
-        score: team.reduce((s, p) => s + p.score, 0),
-      });
     }
   }
-  return teams;
-};
-
-const selectGreedyMatches = (possibleMatches, usedIdsGlobal) => {
-  const localUsed = new Set();
-  const selected = [];
-  for (const match of possibleMatches) {
-    const ids = [...match.teamA, ...match.teamB].map((p) => p.id);
-    if (ids.some((id) => usedIdsGlobal.has(id) || localUsed.has(id))) continue;
-    ids.forEach((id) => localUsed.add(id));
-    selected.push(match);
-    if (selected.length >= TOTAL_COURTS) break;
-  }
-  return selected;
-};
-
-const buildCandidateMatches = (pool, meta, modeValue, evaluator) => {
-  const teams = buildTeamCandidates(pool, modeValue);
-  const possibleMatches = [];
-
-  for (let i = 0; i < teams.length; i += 1) {
-    for (let j = i + 1; j < teams.length; j += 1) {
-      const idsA = new Set(teams[i].players.map((p) => p.id));
-      if (teams[j].players.some((p) => idsA.has(p.id))) continue;
-      const evaluated = evaluator(teams[i].players, teams[j].players);
-      if (!evaluated) continue;
-      possibleMatches.push({
-        courtId: 0,
-        teamA: teams[i].players,
-        teamB: teams[j].players,
-        ...evaluated,
-        penalty: scorePreferencePenalty(meta, teams[i].players, teams[j].players, evaluated),
-      });
-    }
-  }
-
-  return possibleMatches.sort((a, b) => a.penalty - b.penalty);
-};
-
-const pickBestRound = (basePlayers, meta, modeValue) => {
-  const enriched = enrichPlayers(basePlayers, meta).filter((p) => p.remaining > 0);
-  if (enriched.length < 4) return [];
-
-  const ordered = shuffle(enriched).sort((a, b) => {
-    const remainingDiff = (b.maxGames - meta.playerStats[b.id].gamesPlayed) - (a.maxGames - meta.playerStats[a.id].gamesPlayed);
-    if (remainingDiff !== 0) return remainingDiff;
-    return meta.playerStats[a.id].gamesPlayed - meta.playerStats[b.id].gamesPlayed;
+  return matches.sort((a, b) => a.penalty - b.penalty);
+}
+function generateGeneralSchedule(players, mode) {
+  const rounds = [];
+  const stats = {};
+  players.forEach((p) => {
+    stats[p.id] = { count: 0 };
   });
 
-  const usedIds = new Set();
+  for (let roundId = 1; roundId <= 60; roundId += 1) {
+    const available = players.filter((p) => stats[p.id].count < p.maxGames);
+    if (available.length < 4) break;
+    const candidates = buildCandidateMatches(shuffle(available), mode);
+    const selected = [];
+    const used = new Set();
 
-  if (modeValue === "rivalry") {
-    const strictPossible = buildCandidateMatches(ordered, meta, modeValue, evaluateRivalryStrictMatch);
-    const strictSelected = selectGreedyMatches(strictPossible, usedIds);
-    strictSelected.forEach((match) => [...match.teamA, ...match.teamB].forEach((p) => usedIds.add(p.id)));
-
-    if (strictSelected.length >= TOTAL_COURTS) {
-      return strictSelected.map((m, idx) => ({ ...m, courtId: idx + 1 }));
+    for (const c of candidates) {
+      const ids = [...c.teamA, ...c.teamB].map((p) => p.id);
+      if (ids.some((id) => used.has(id))) continue;
+      ids.forEach((id) => used.add(id));
+      selected.push({ ...c, courtId: selected.length + 1 });
+      if (selected.length >= TOTAL_COURTS) break;
     }
 
-    const remainPool = ordered.filter((p) => !usedIds.has(p.id));
-    const flexiblePossible = buildCandidateMatches(remainPool, meta, modeValue, evaluateRivalryFlexibleMatch);
-    const flexibleSelected = selectGreedyMatches(flexiblePossible, usedIds);
-    return [...strictSelected, ...flexibleSelected]
-      .slice(0, TOTAL_COURTS)
-      .map((m, idx) => ({ ...m, courtId: idx + 1 }));
+    if (!selected.length) break;
+    selected.forEach((m) => {
+      [...m.teamA, ...m.teamB].forEach((p) => {
+        stats[p.id].count += 1;
+      });
+    });
+    rounds.push({ id: roundId, matches: selected });
+    if (players.every((p) => stats[p.id].count >= p.maxGames)) break;
   }
+  return { rounds };
+}
 
-  const evaluator = modeValue === "tournament" ? evaluateTournamentMatch : evaluateFriendlyLikeMatch;
-  const possible = buildCandidateMatches(ordered, meta, modeValue, evaluator);
-  return selectGreedyMatches(possible, usedIds).map((m, idx) => ({ ...m, courtId: idx + 1 }));
-};
+function buildAgeTeams(players) {
+  const grouped = Object.fromEntries(AGE_BANDS.map((age) => [age, []]));
+  players.forEach((p) => grouped[p.ageBand].push(p));
 
-const commitMatchesToMeta = (matches, meta) => {
-  matches.forEach((match) => {
-    const typeA = getTeamType(match.teamA);
-    const typeB = getTeamType(match.teamB);
+  const mainTeams = [];
+  const minorPools = { 남: [], 여: [] };
 
-    [...match.teamA, ...match.teamB].forEach((player) => {
-      meta.playerStats[player.id].gamesPlayed += 1;
-    });
-
-    match.teamA.forEach((player) => {
-      meta.playerStats[player.id].sameTypeGames[typeA] += 1;
-    });
-    match.teamB.forEach((player) => {
-      meta.playerStats[player.id].sameTypeGames[typeB] += 1;
-    });
-
-    [match.teamA, match.teamB].forEach((team) => {
-      const k = pairKey(team[0].id, team[1].id);
-      meta.teamPairCounts[k] = (meta.teamPairCounts[k] || 0) + 1;
-    });
-
-    const crossPairs = [
-      [match.teamA[0].id, match.teamB[0].id],
-      [match.teamA[0].id, match.teamB[1].id],
-      [match.teamA[1].id, match.teamB[0].id],
-      [match.teamA[1].id, match.teamB[1].id],
-    ];
-    crossPairs.forEach(([a, b]) => {
-      const k = opponentKey(a, b);
-      meta.opponentCounts[k] = (meta.opponentCounts[k] || 0) + 1;
+  AGE_BANDS.forEach((age) => {
+    const members = grouped[age];
+    if (!members.length) return;
+    const males = members.filter((p) => p.gender === "남");
+    const females = members.filter((p) => p.gender === "여");
+    let mode = "HON";
+    let active = members;
+    if (males.length > females.length) {
+      mode = "NAM";
+      active = males;
+      minorPools.여.push(...females);
+    } else if (females.length > males.length) {
+      mode = "YEO";
+      active = females;
+      minorPools.남.push(...males);
+    } else {
+      mode = "HON";
+      active = members;
+    }
+    mainTeams.push({
+      id: `${age}-main`,
+      name: `${age}팀`,
+      baseAge: age,
+      source: "age",
+      matchMode: mode,
+      players: [...active],
     });
   });
-};
 
-const getRoundPenalty = (matches) => matches.reduce((sum, m) => sum + (m.penalty || 0), 0);
+  const extraTeams = [];
+  if (minorPools.남.length >= 4) {
+    extraTeams.push({ id: "minor-male", name: "소수남성팀", baseAge: "40대", source: "minor", matchMode: "NAM", players: [...minorPools.남] });
+    minorPools.남 = [];
+  }
+  if (minorPools.여.length >= 4) {
+    extraTeams.push({ id: "minor-female", name: "소수여성팀", baseAge: "40대", source: "minor", matchMode: "YEO", players: [...minorPools.여] });
+    minorPools.여 = [];
+  }
+  const mixPool = [...minorPools.남, ...minorPools.여];
+  if (mixPool.length >= 4) {
+    const male = mixPool.filter((p) => p.gender === "남").length;
+    const female = mixPool.filter((p) => p.gender === "여").length;
+    extraTeams.push({
+      id: "minor-mix",
+      name: male === female ? "소수혼합팀" : male > female ? "소수남성팀" : "소수여성팀",
+      baseAge: "40대",
+      source: "minor",
+      matchMode: male === female ? "HON" : male > female ? "NAM" : "YEO",
+      players: mixPool,
+    });
+  }
 
-const Card = ({ children, style = {}, className = "" }) => (
-  <div className={className} style={{ ...styles.card, ...style }}>{children}</div>
-);
+  return [...mainTeams, ...extraTeams].filter((t) => t.players.length > 0);
+}
 
-const SectionCard = ({ title, right, children }) => (
-  <div style={styles.sectionCard}>
-    <div
-      style={{
-        padding: "18px 18px 14px",
-        borderBottom: "1px solid #eef2ff",
-        display: "flex",
-        gap: 12,
-        alignItems: "center",
-        justifyContent: "space-between",
-        flexWrap: "wrap",
-      }}
-    >
-      <div style={{ fontSize: 22, fontWeight: 900, color: "#1e1b4b" }}>{title}</div>
-      {right}
-    </div>
-    <div style={{ padding: 18 }}>{children}</div>
-  </div>
-);
+function fillTeamShortage(teams, allPlayers) {
+  const assigned = new Set(teams.flatMap((t) => t.players.map((p) => p.id)));
+  const manualExtras = allPlayers.filter((p) => p.leagueTargetTeam && !assigned.has(p.id));
+  manualExtras.forEach((p) => {
+    const team = teams.find((t) => t.name === p.leagueTargetTeam);
+    if (team) team.players.push(p);
+  });
 
-const Button = ({ children, onClick, variant = "primary", disabled = false, style = {}, type = "button" }) => {
-  const map = {
-    primary: {
-      background: "linear-gradient(135deg, #6366f1 0%, #3b82f6 100%)",
-      color: "white",
-      boxShadow: "0 10px 24px rgba(59, 130, 246, 0.24)",
-    },
-    secondary: {
-      background: "white",
-      color: "#334155",
-      border: "1px solid #cbd5e1",
-      boxShadow: "0 8px 18px rgba(15, 23, 42, 0.05)",
-    },
-    success: {
-      background: "linear-gradient(135deg, #22c55e 0%, #16a34a 100%)",
-      color: "white",
-      boxShadow: "0 10px 24px rgba(34, 197, 94, 0.20)",
-    },
-    danger: {
-      background: "linear-gradient(135deg, #ef4444 0%, #dc2626 100%)",
-      color: "white",
-      boxShadow: "0 10px 24px rgba(239, 68, 68, 0.20)",
-    },
-    excel: {
-      background: "linear-gradient(135deg, #16a34a 0%, #15803d 100%)",
-      color: "white",
-      boxShadow: "0 10px 24px rgba(34, 197, 94, 0.18)",
-    },
-    modeBack: {
-      background: "rgba(255,255,255,0.88)",
-      color: "#1f2937",
-      border: "1px solid #e2e8f0",
-      boxShadow: "0 8px 18px rgba(15,23,42,.04)",
-    },
-  };
+  const availableElsewhere = () =>
+    teams.flatMap((t) =>
+      t.players.map((p) => ({ ...p, _fromTeam: t.name, _fromBaseAge: t.baseAge, _source: t.source }))
+    );
 
-  return (
-    <button
-      type={type}
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        ...styles.button,
-        ...map[variant],
-        opacity: disabled ? 0.5 : 1,
-        cursor: disabled ? "not-allowed" : "pointer",
-        ...style,
-      }}
-    >
-      {children}
-    </button>
-  );
-};
+  teams.forEach((team) => {
+    const minNeeded = team.matchMode === "HON" ? 4 : 4;
+    while (team.players.length < minNeeded) {
+      const pool = availableElsewhere()
+        .filter((p) => p._fromTeam !== team.name)
+        .filter((p) => !team.players.some((tp) => tp.id === p.id))
+        .filter((p) => {
+          if (team.matchMode === "NAM") return p.gender === "남";
+          if (team.matchMode === "YEO") return p.gender === "여";
+          return true;
+        })
+        .sort((a, b) => {
+          const aAgeGap = Math.abs((AGE_INDEX[a.ageBand] ?? 2) - (AGE_INDEX[team.baseAge] ?? 2));
+          const bAgeGap = Math.abs((AGE_INDEX[b.ageBand] ?? 2) - (AGE_INDEX[team.baseAge] ?? 2));
+          if (aAgeGap !== bAgeGap) return aAgeGap - bAgeGap;
+          const aScore = Math.abs(adjustedScoreForTargetAge(a, team.baseAge) - team.players.reduce((s, p) => s + adjustedScoreForTargetAge(p, team.baseAge), 0) / Math.max(team.players.length, 1));
+          const bScore = Math.abs(adjustedScoreForTargetAge(b, team.baseAge) - team.players.reduce((s, p) => s + adjustedScoreForTargetAge(p, team.baseAge), 0) / Math.max(team.players.length, 1));
+          return aScore - bScore;
+        });
+      if (!pool.length) break;
+      const picked = pool[0];
+      team.players.push({ ...picked, leagueBorrowedFrom: picked._fromTeam });
+      const donor = teams.find((t) => t.name === picked._fromTeam);
+      if (donor) donor.players = donor.players.filter((x) => x.id !== picked.id);
+    }
+  });
+  return teams.filter((t) => t.players.length >= 4);
+}
 
-const Pill = ({ children, tone = "slate" }) => {
-  const toneMap = {
+function pickFixedPairs(players) {
+  const map = new Map(players.map((p) => [p.id, p]));
+  const used = new Set();
+  const fixedPairs = [];
+  players.forEach((p) => {
+    if (!p.fixedPartnerId || used.has(p.id)) return;
+    const partner = map.get(p.fixedPartnerId);
+    if (!partner || used.has(partner.id)) return;
+    used.add(p.id);
+    used.add(partner.id);
+    fixedPairs.push([p, partner]);
+  });
+  return { fixedPairs, remaining: players.filter((p) => !used.has(p.id)) };
+}
+
+function autoPairPlayers(players, matchMode, baseAge) {
+  const { fixedPairs, remaining } = pickFixedPairs(players);
+  const pairs = [...fixedPairs];
+
+  const scoreForPairing = (p) => adjustedScoreForTargetAge(p, baseAge);
+  const rem = [...remaining];
+
+  if (matchMode === "NAM") {
+    const men = rem.filter((p) => p.gender === "남").sort((a, b) => scoreForPairing(b) - scoreForPairing(a));
+    while (men.length >= 2) {
+      const high = men.shift();
+      let bestIdx = 0;
+      let bestVal = Infinity;
+      men.forEach((cand, idx) => {
+        const val = Math.abs(scoreForPairing(high) - scoreForPairing(cand));
+        if (val < bestVal) {
+          bestVal = val;
+          bestIdx = idx;
+        }
+      });
+      const partner = men.splice(bestIdx, 1)[0];
+      pairs.push([high, partner]);
+    }
+  } else if (matchMode === "YEO") {
+    const women = rem.filter((p) => p.gender === "여").sort((a, b) => scoreForPairing(b) - scoreForPairing(a));
+    while (women.length >= 2) {
+      const high = women.shift();
+      let bestIdx = 0;
+      let bestVal = Infinity;
+      women.forEach((cand, idx) => {
+        const val = Math.abs(scoreForPairing(high) - scoreForPairing(cand));
+        if (val < bestVal) {
+          bestVal = val;
+          bestIdx = idx;
+        }
+      });
+      const partner = women.splice(bestIdx, 1)[0];
+      pairs.push([high, partner]);
+    }
+  } else {
+    const men = rem.filter((p) => p.gender === "남").sort((a, b) => scoreForPairing(b) - scoreForPairing(a));
+    const women = rem.filter((p) => p.gender === "여").sort((a, b) => scoreForPairing(a) - scoreForPairing(b));
+    while (men.length && women.length) {
+      const m = men.shift();
+      let bestIdx = 0;
+      let bestVal = Infinity;
+      women.forEach((cand, idx) => {
+        const val = Math.abs(scoreForPairing(m) - scoreForPairing(cand));
+        if (val < bestVal) {
+          bestVal = val;
+          bestIdx = idx;
+        }
+      });
+      const w = women.splice(bestIdx, 1)[0];
+      pairs.push([m, w]);
+    }
+  }
+
+  return pairs.filter((p) => p.length === 2);
+}
+
+function buildRoundRobin(n) {
+  const list = Array.from({ length: n }, (_, i) => i);
+  const ghost = n % 2 === 1 ? n : null;
+  const arr = ghost === null ? [...list] : [...list, ghost];
+  const rounds = [];
+  for (let r = 0; r < arr.length - 1; r += 1) {
+    const pairs = [];
+    for (let i = 0; i < arr.length / 2; i += 1) {
+      const a = arr[i];
+      const b = arr[arr.length - 1 - i];
+      if (a !== ghost && b !== ghost) pairs.push([a, b]);
+    }
+    rounds.push(pairs);
+    arr.splice(1, 0, arr.pop());
+  }
+  return rounds;
+}
+
+function buildLeagueSchedule(players) {
+  let teams = buildAgeTeams(players);
+  teams = fillTeamShortage(teams, players);
+
+  const teamBundles = teams
+    .map((team) => {
+      const pairs = autoPairPlayers(team.players, team.matchMode, team.baseAge).map((pair, idx) => ({
+        id: `${team.id}-pair-${idx + 1}`,
+        label: `${idx + 1}조`,
+        teamName: team.name,
+        matchMode: team.matchMode,
+        players: pair,
+        score: pair.reduce((s, p) => s + adjustedScoreForTargetAge(p, team.baseAge), 0),
+      }));
+      return { ...team, pairs };
+    })
+    .filter((t) => t.pairs.length >= 2);
+
+  const rounds = [];
+  let roundId = 1;
+
+  teamBundles.forEach((team) => {
+    const rr = buildRoundRobin(team.pairs.length);
+    rr.forEach((pairings, rrIdx) => {
+      const matches = pairings.map(([aIdx, bIdx], idx) => {
+        const a = team.pairs[aIdx];
+        const b = team.pairs[bIdx];
+        return {
+          courtId: idx + 1,
+          teamName: team.name,
+          internalRound: rrIdx + 1,
+          pairA: a,
+          pairB: b,
+          scoreA: a.score,
+          scoreB: b.score,
+          diff: Math.abs(a.score - b.score),
+          label: `${team.name} ${typeLabel(team.matchMode)} ${a.label} vs ${b.label}`,
+          result: { a: "", b: "" },
+        };
+      });
+      for (let i = 0; i < matches.length; i += TOTAL_COURTS) {
+        rounds.push({
+          id: roundId,
+          groupName: team.name,
+          internalRound: rrIdx + 1,
+          matches: matches.slice(i, i + TOTAL_COURTS).map((m, idx) => ({ ...m, courtId: idx + 1 })),
+        });
+        roundId += 1;
+      }
+    });
+  });
+
+  return { rounds, teams: teamBundles };
+}
+
+function computeLeagueStandings(schedule, leagueTeams) {
+  const standings = {};
+  leagueTeams.forEach((team) => {
+    team.pairs.forEach((pair) => {
+      standings[pair.id] = {
+        id: pair.id,
+        teamName: team.name,
+        label: pair.label,
+        players: pair.players,
+        played: 0,
+        wins: 0,
+        draws: 0,
+        losses: 0,
+        pointsFor: 0,
+        pointsAgainst: 0,
+        diff: 0,
+        leaguePoints: 0,
+      };
+    });
+  });
+
+  schedule.forEach((round) => {
+    round.matches.forEach((match) => {
+      if (!match.pairA || !match.pairB) return;
+      const a = Number(match.result?.a);
+      const b = Number(match.result?.b);
+      if (!Number.isFinite(a) || !Number.isFinite(b)) return;
+      const rowA = standings[match.pairA.id];
+      const rowB = standings[match.pairB.id];
+      if (!rowA || !rowB) return;
+      rowA.played += 1;
+      rowB.played += 1;
+      rowA.pointsFor += a;
+      rowA.pointsAgainst += b;
+      rowB.pointsFor += b;
+      rowB.pointsAgainst += a;
+      if (a > b) {
+        rowA.wins += 1;
+        rowB.losses += 1;
+        rowA.leaguePoints += 3;
+      } else if (b > a) {
+        rowB.wins += 1;
+        rowA.losses += 1;
+        rowB.leaguePoints += 3;
+      } else {
+        rowA.draws += 1;
+        rowB.draws += 1;
+        rowA.leaguePoints += 1;
+        rowB.leaguePoints += 1;
+      }
+    });
+  });
+
+  Object.values(standings).forEach((row) => {
+    row.diff = row.pointsFor - row.pointsAgainst;
+  });
+
+  const grouped = {};
+  Object.values(standings).forEach((row) => {
+    if (!grouped[row.teamName]) grouped[row.teamName] = [];
+    grouped[row.teamName].push(row);
+  });
+
+  Object.keys(grouped).forEach((teamName) => {
+    grouped[teamName].sort((a, b) => {
+      if (b.leaguePoints !== a.leaguePoints) return b.leaguePoints - a.leaguePoints;
+      if (b.wins !== a.wins) return b.wins - a.wins;
+      if (b.diff !== a.diff) return b.diff - a.diff;
+      if (b.pointsFor !== a.pointsFor) return b.pointsFor - a.pointsFor;
+      return a.label.localeCompare(b.label, "ko");
+    });
+  });
+
+  return grouped;
+}
+
+function Pill({ children, tone = "slate" }) {
+  const tones = {
     slate: { background: "#f1f5f9", color: "#334155" },
     blue: { background: "#dbeafe", color: "#1d4ed8" },
     pink: { background: "#fce7f3", color: "#be185d" },
-    indigo: { background: "#e0e7ff", color: "#4338ca" },
-    orange: { background: "#ffedd5", color: "#c2410c" },
     green: { background: "#dcfce7", color: "#166534" },
+    orange: { background: "#ffedd5", color: "#c2410c" },
+    indigo: { background: "#e0e7ff", color: "#4338ca" },
   };
-  return <span style={{ ...styles.pill, ...toneMap[tone] }}>{children}</span>;
-};
+  return <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 999, fontSize: 12, fontWeight: 800, ...tones[tone] }}>{children}</span>;
+}
 
-const Input = (props) => <input {...props} style={{ ...styles.input, ...(props.style || {}) }} />;
-const Select = ({ children, ...props }) => <select {...props} style={{ ...styles.select, ...(props.style || {}) }}>{children}</select>;
-
-function LogoPanel() {
+function Section({ title, right, children }) {
   return (
-    <div style={styles.brandLogoBox}>
-      <div style={styles.brandTop}>YEAR OF THE MON</div>
-      <div style={styles.brandMain}>BADMONKEYZ</div>
-      <div style={styles.brandSub}>BADMINTON</div>
+    <div style={{ ...styles.card, overflow: "hidden" }}>
+      <div style={{ padding: 16, borderBottom: "1px solid #eef2ff", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 20, fontWeight: 900 }}>{title}</div>
+        {right}
+      </div>
+      <div style={{ padding: 16 }}>{children}</div>
     </div>
   );
 }
 
-function HomePage({ onSelectMode }) {
-  return (
-    <div style={styles.homeHero}>
-      <div style={styles.watermark}>BADMONKEYZ</div>
-      <LogoPanel />
-      <div style={styles.titleBlock}>
-        <h1 style={styles.title}>BADMONKEYZ</h1>
-        <div style={styles.subtitle}>Badminton Match System</div>
-      </div>
-      <div style={styles.lead}>
-        배드민턴 친선전 · 대회 · 대항전을 자동으로 생성하는 매치 시스템입니다.<br />
-        원하는 경기 모드를 선택해 바로 시작할 수 있습니다.
-      </div>
-
-      <div style={styles.modeGrid}>
-        {MODES.map((mode) => {
-          const theme = accentTheme[mode.accent];
-          const copy = MODE_COPY[mode.value];
-          return (
-            <div
-              key={mode.value}
-              style={{ ...styles.modeCard, background: theme.soft, boxShadow: theme.shadow, border: `1px solid ${theme.border}` }}
-              onClick={() => onSelectMode(mode.value)}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = "translateY(-6px)";
-                e.currentTarget.style.boxShadow = theme.shadow.replace("34px", "42px");
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = "translateY(0)";
-                e.currentTarget.style.boxShadow = theme.shadow;
-              }}
-            >
-              <div style={{ padding: 24 }}>
-                <div
-                  style={{
-                    width: 70,
-                    height: 70,
-                    borderRadius: 20,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 36,
-                    background: "rgba(255,255,255,0.78)",
-                    boxShadow: "inset 0 1px 0 rgba(255,255,255,.8)",
-                  }}
-                >
-                  {mode.icon}
-                </div>
-                <div style={{ marginTop: 18, fontSize: 32, fontWeight: 950, color: theme.text }}>{mode.label}</div>
-                <div style={{ marginTop: 10, color: "#475569", lineHeight: 1.7, minHeight: 70 }}>{copy.description}</div>
-                <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
-                  {copy.bullets.map((bullet) => (
-                    <div key={bullet} style={{ color: theme.text, fontWeight: 700, display: "flex", gap: 8, alignItems: "center" }}>
-                      <span>✓</span>
-                      <span>{bullet}</span>
-                    </div>
-                  ))}
-                </div>
-                <Button
-                  variant="primary"
-                  style={{
-                    width: "100%",
-                    marginTop: 18,
-                    background: theme.button,
-                    color: theme.buttonText,
-                    boxShadow: "0 10px 24px rgba(15,23,42,.10)",
-                  }}
-                >
-                  {mode.label} 시작
-                </Button>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function useResponsive() {
-  const [mobile, setMobile] = useState(() => (typeof window !== "undefined" ? window.innerWidth < 768 : false));
-  useEffect(() => {
-    const onResize = () => setMobile(window.innerWidth < 768);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-  return mobile;
-}
-
-function App() {
-  const isMobile = useResponsive();
-  const [players, setPlayers] = useState([]);
-  const [schedule, setSchedule] = useState([]);
-  const [activeTab, setActiveTab] = useState("players");
-  const [mode, setMode] = useState("friendly");
-  const [homeMode, setHomeMode] = useState(true);
-  const [playerForm, setPlayerForm] = useState(emptyPlayerForm);
-  const [message, setMessage] = useState("");
-  const [uploadSummary, setUploadSummary] = useState(null);
-  const [editingId, setEditingId] = useState(null);
-
+export default function App() {
+  const uploadRef = useRef(null);
   const scheduleRef = useRef(null);
-  const uploadInputRef = useRef(null);
+
+  const [players, setPlayers] = useState([]);
+  const [form, setForm] = useState(emptyForm);
+  const [mode, setMode] = useState("friendly");
+  const [tab, setTab] = useState("players");
+  const [message, setMessage] = useState("");
+  const [schedule, setSchedule] = useState([]);
+  const [leagueTeams, setLeagueTeams] = useState([]);
+  const [homeMode, setHomeMode] = useState(true);
+  const [uploadSummary, setUploadSummary] = useState(null);
+  const [selectedPlayerId, setSelectedPlayerId] = useState("");
+  const [selectedPartnerId, setSelectedPartnerId] = useState("");
+  const [manualTargetTeam, setManualTargetTeam] = useState("");
 
   useEffect(() => {
     try {
-      const savedPlayers = localStorage.getItem(STORAGE_KEY_PLAYERS);
-      const savedMode = localStorage.getItem(STORAGE_KEY_MODE);
-      const savedHome = localStorage.getItem(STORAGE_KEY_HOME);
-      if (savedPlayers) {
-        const parsed = JSON.parse(savedPlayers);
-        if (Array.isArray(parsed)) {
-          setPlayers(parsed.map((p, idx) => makePlayer(p.id ?? idx + 1, p)).filter((p) => p.name));
-        }
-      }
-      if (savedMode && MODES.some((m) => m.value === savedMode)) setMode(savedMode);
-      if (savedHome !== null) setHomeMode(savedHome === "true");
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      setPlayers((parsed.players || []).map((p, idx) => makePlayer(p.id ?? idx + 1, p)).filter((p) => p.name));
+      if (MODES.some((m) => m.value === parsed.mode)) setMode(parsed.mode);
+      setHomeMode(parsed.homeMode ?? true);
     } catch (e) {
       console.error(e);
     }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY_PLAYERS, JSON.stringify(players));
-  }, [players]);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ players, mode, homeMode }));
+  }, [players, mode, homeMode]);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY_MODE, mode);
-  }, [mode]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY_HOME, String(homeMode));
-  }, [homeMode]);
-
-  useEffect(() => {
-    setSchedule([]);
-    setActiveTab("players");
-    setUploadSummary(null);
-    setMessage("");
-  }, [mode]);
-
-  const playersWithLiveScore = useMemo(() => players.map((p) => ({ ...p, liveScore: getPlayerScore(p) })), [players]);
   const nextId = useMemo(() => (players.length ? Math.max(...players.map((p) => p.id)) + 1 : 1), [players]);
-  const modeTheme = accentTheme[MODES.find((m) => m.value === mode)?.accent || "blue"];
-  const modeInfo = MODE_COPY[mode];
+  const leagueStandings = useMemo(() => computeLeagueStandings(schedule, leagueTeams), [schedule, leagueTeams]);
 
-  const countByGender = useCallback((gender) => players.filter((p) => p.gender === gender).length, [players]);
-  const countByTeam = useCallback((team) => players.filter((p) => p.team === team).length, [players]);
+  const countMale = players.filter((p) => p.gender === "남").length;
+  const countFemale = players.filter((p) => p.gender === "여").length;
 
-  const theoreticalRounds = useMemo(() => {
-    const totalGames = players.reduce((sum, p) => sum + Number(p.maxGames || 0), 0);
-    const totalMatches = Math.floor(totalGames / 4);
-    return Math.floor(totalMatches / TOTAL_COURTS);
-  }, [players]);
+  function resetModeOutput() {
+    setSchedule([]);
+    setLeagueTeams([]);
+    setTab("players");
+  }
 
-  const changeGenderInForm = (gender) => {
-    setPlayerForm((prev) => ({
-      ...prev,
-      gender,
-      events: normalizeEventsByGender(gender, prev.events),
-    }));
-  };
-
-  const updatePlayerField = (id, patch) => {
-    setPlayers((prev) =>
-      prev.map((p) => {
-        if (p.id !== id) return p;
-        const merged = { ...p, ...patch };
-        if (patch.gender && patch.gender !== p.gender) {
-          merged.events = normalizeEventsByGender(patch.gender, merged.events);
-        }
-        return makePlayer(id, merged);
-      })
-    );
-  };
-
-  const addPlayer = () => {
-    const trimmedName = playerForm.name.trim();
-    if (!trimmedName) {
-      setMessage("선수 이름을 입력해 주세요.");
-      return;
-    }
-    if (players.some((p) => p.name === trimmedName)) {
-      setMessage(`'${trimmedName}' 선수는 이미 등록되어 있습니다.`);
-      return;
-    }
-
-    const candidate = makePlayer(nextId, {
-      ...playerForm,
-      name: trimmedName,
-      customScore: playerForm.customScore === "" ? null : playerForm.customScore,
+  function addPlayer() {
+    const name = form.name.trim();
+    if (!name) return setMessage("선수 이름을 입력해 주세요.");
+    if (players.some((p) => p.name === name)) return setMessage(`'${name}' 선수는 이미 등록되어 있습니다.`);
+    const player = makePlayer(nextId, {
+      ...form,
+      customScore: form.customScore === "" ? null : form.customScore,
     });
-
-    setPlayers((prev) => [...prev, candidate]);
-    setPlayerForm((prev) => ({
-      ...emptyPlayerForm,
+    setPlayers((prev) => [...prev, player]);
+    setForm((prev) => ({
+      ...emptyForm,
       gender: prev.gender,
       grade: prev.grade,
-      team: prev.team,
+      ageBand: prev.ageBand,
+      rivalryTeam: prev.rivalryTeam,
       events: normalizeEventsByGender(prev.gender, prev.events),
     }));
-    setMessage(`선수 '${candidate.name}' 등록 완료`);
-  };
+    setMessage(`선수 '${name}' 등록 완료`);
+    resetModeOutput();
+  }
 
-  const deletePlayer = (id) => {
-    setPlayers((prev) => prev.filter((p) => p.id !== id));
-    setSchedule([]);
-  };
+  function updatePlayer(id, patch) {
+    setPlayers((prev) => prev.map((p) => (p.id === id ? makePlayer(id, { ...p, ...patch }) : p)));
+    resetModeOutput();
+  }
 
-  const resetAllPlayers = () => {
-    if (!window.confirm("등록된 선수 전체를 삭제할까요?")) return;
+  function removePlayer(id) {
+    setPlayers((prev) => prev.filter((p) => p.id !== id).map((p) => ({ ...p, fixedPartnerId: p.fixedPartnerId === id ? null : p.fixedPartnerId })));
+    resetModeOutput();
+  }
+
+  function resetPlayers() {
+    if (!window.confirm("전체 선수 목록을 삭제할까요?")) return;
     setPlayers([]);
     setSchedule([]);
-    setMessage("전체 선수 목록이 초기화되었습니다.");
-  };
+    setLeagueTeams([]);
+    setMessage("전체 초기화 완료");
+  }
 
-  const triggerExcelUpload = () => uploadInputRef.current?.click();
-
-  const downloadTemplate = () => {
+  function downloadTemplate() {
     const rows = [
-      {
-        이름: "김철수",
-        성별: "남",
-        급수: "B",
-        목표경기: 3,
-        커스텀점수: "",
-        소속팀: "홈팀",
-        남복참가: "Y",
-        여복참가: "",
-        혼복참가: "",
-      },
-      {
-        이름: "이영희",
-        성별: "여",
-        급수: "C",
-        목표경기: 3,
-        커스텀점수: "",
-        소속팀: "원정팀",
-        남복참가: "",
-        여복참가: "Y",
-        혼복참가: "Y",
-      },
+      { 이름: "김철수", 성별: "남", 급수: "C", 연령대: "40대" },
+      { 이름: "이영희", 성별: "여", 급수: "B", 연령대: "30대" },
     ];
     const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [
-      { wch: 14 },
-      { wch: 8 },
-      { wch: 8 },
-      { wch: 10 },
-      { wch: 12 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 10 },
-      { wch: 10 },
-    ];
+    ws["!cols"] = [{ wch: 12 }, { wch: 8 }, { wch: 8 }, { wch: 10 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "선수등록예시");
-    XLSX.writeFile(wb, `BADMONKEYZ_선수등록_예시_${getKoreanDateString()}.xlsx`);
-  };
+    XLSX.writeFile(wb, `BADMONKEYZ_선수등록_예시_${dateStamp()}.xlsx`);
+  }
 
-  const parseTruthy = (value) => ["y", "yes", "1", "true", "o", "참가"].includes(String(value ?? "").trim().toLowerCase());
-
-  const handleExcelUpload = async (e) => {
+  async function handleExcelUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setUploadSummary(null);
-
     try {
       const data = await file.arrayBuffer();
-      const wb = XLSX.read(data);
+      const wb = XLSX.read(data, { type: "array" });
       const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
-
-      let currentId = nextId;
+      const rows = XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
+      let id = nextId;
       const success = [];
-      const failures = [];
-      const existingNames = new Set(players.map((p) => p.name));
-      const newNames = new Set();
+      const fail = [];
+      const existing = new Set(players.map((p) => p.name));
+      const staged = new Set();
+      const getRowValue = (row, aliases) => {
+        const entries = Object.entries(row || {});
+        for (const alias of aliases) {
+          const wanted = normalizeHeaderKey(alias);
+          const found = entries.find(([k]) => normalizeHeaderKey(k) === wanted);
+          if (found) return found[1];
+        }
+        return "";
+      };
 
       rows.forEach((row, idx) => {
         const rowNo = idx + 2;
-        const name = String(row.이름 ?? row.name ?? "").trim();
-        const gender = String(row.성별 ?? row.gender ?? "").trim();
-        const grade = String(row.급수 ?? row.grade ?? "").trim();
-        const maxGamesRaw = row.목표경기 ?? row.maxGames ?? row["목표 경기"];
-        const customScoreRaw = row.커스텀점수 ?? row.customScore ?? "";
-        const team = String(row.소속팀 ?? row.team ?? "홈팀").trim() || "홈팀";
-        const nam = parseTruthy(row.남복참가 ?? row.nam ?? "");
-        const yeo = parseTruthy(row.여복참가 ?? row.yeo ?? "");
-        const hon = parseTruthy(row.혼복참가 ?? row.hon ?? "");
+        const name = String(getRowValue(row, ["이름", "name"]) || "").trim();
+        const gender = String(getRowValue(row, ["성별", "gender"]) || "").trim();
+        const grade = String(getRowValue(row, ["급수", "grade"]) || "").trim();
+        const ageBand = String(getRowValue(row, ["연령대", "연령", "ageband", "age group"]) || "").trim();
+        const maxGames = getRowValue(row, ["목표경기", "최대경기", "maxgames"]);
+        const customScore = getRowValue(row, ["커스텀점수", "customscore"]);
+        const rivalryTeam = getRowValue(row, ["소속팀", "team"]);
+        const nam = parseTruthy(getRowValue(row, ["남복참가", "nam"]));
+        const yeo = parseTruthy(getRowValue(row, ["여복참가", "yeo"]));
+        const hon = parseTruthy(getRowValue(row, ["혼복참가", "hon"]));
 
-        if (!name) return failures.push({ rowNo, reason: "이름이 비어 있습니다." });
-        if (existingNames.has(name) || newNames.has(name)) return failures.push({ rowNo, reason: "중복된 이름입니다." });
-        if (!GENDERS.includes(gender)) return failures.push({ rowNo, reason: "성별은 남 또는 여여야 합니다." });
-        if (!GRADES.includes(grade)) return failures.push({ rowNo, reason: "급수는 A/B/C/D/초심 중 하나여야 합니다." });
-
-        const maxGames = Number(maxGamesRaw);
-        if (!Number.isFinite(maxGames) || maxGames < 1 || maxGames > MAX_GAMES) {
-          return failures.push({ rowNo, reason: `목표경기는 1~${MAX_GAMES} 사이 숫자여야 합니다.` });
+        if (!name || !gender || !grade || !ageBand) {
+          fail.push({ rowNo, reason: "필수값(이름/성별/급수/연령대)이 비어 있습니다." });
+          return;
         }
-
-        if (
-          !(customScoreRaw === "" || customScoreRaw === null || customScoreRaw === undefined) &&
-          !Number.isFinite(Number(customScoreRaw))
-        ) {
-          return failures.push({ rowNo, reason: "커스텀점수는 비우거나 숫자여야 합니다." });
+        if (existing.has(name) || staged.has(name)) {
+          fail.push({ rowNo, reason: "중복된 이름입니다." });
+          return;
         }
-
-        if (!TEAMS.includes(team)) return failures.push({ rowNo, reason: "소속팀은 홈팀/원정팀이어야 합니다." });
-
-        const candidate = makePlayer(currentId++, {
+        if (!GENDERS.includes(gender)) {
+          fail.push({ rowNo, reason: "성별은 남/여만 가능합니다." });
+          return;
+        }
+        if (!GRADES.includes(grade)) {
+          fail.push({ rowNo, reason: "급수는 A/B/C/D/초심만 가능합니다." });
+          return;
+        }
+        if (!AGE_BANDS.includes(ageBand)) {
+          fail.push({ rowNo, reason: "연령대는 20대/30대/40대/50대/60대+만 가능합니다." });
+          return;
+        }
+        const player = makePlayer(id++, {
           name,
           gender,
           grade,
-          maxGames,
-          customScore: customScoreRaw === "" ? null : Number(customScoreRaw),
-          team,
-          events: normalizeEventsByGender(gender, { nam, yeo, hon }),
+          ageBand,
+          maxGames: maxGames === "" ? DEFAULT_MAX_GAMES : Number(maxGames),
+          customScore: customScore === "" ? null : Number(customScore),
+          rivalryTeam: RIVALRY_TEAMS.includes(String(rivalryTeam).trim()) ? rivalryTeam : "홈팀",
+          events: normalizeEventsByGender(gender, {
+            nam: nam || gender === "남",
+            yeo: yeo || gender === "여",
+            hon,
+          }),
         });
-        newNames.add(name);
-        success.push(candidate);
+        success.push(player);
+        staged.add(name);
       });
 
-      if (success.length) setPlayers((prev) => [...prev, ...success]);
-      setUploadSummary({
-        total: rows.length,
-        success: success.length,
-        failed: failures.length,
-        failures: failures.slice(0, 5),
-      });
-      setMessage(`엑셀 등록 완료: 성공 ${success.length}건 / 실패 ${failures.length}건`);
+      if (success.length) {
+        setPlayers((prev) => [...prev, ...success]);
+        resetModeOutput();
+      }
+      setUploadSummary({ total: rows.length, success: success.length, failed: fail.length, failures: fail.slice(0, 6) });
+      setMessage(success.length ? `엑셀 업로드 완료: 성공 ${success.length}건 / 실패 ${fail.length}건` : "업로드 실패: 필수값을 확인해 주세요.");
     } catch (err) {
       console.error(err);
       setMessage("엑셀 업로드 중 오류가 발생했습니다.");
     } finally {
-      if (uploadInputRef.current) uploadInputRef.current.value = "";
+      if (uploadRef.current) uploadRef.current.value = "";
     }
-  };
+  }
 
-  const generateSchedule = () => {
-    if (players.length < 4) {
-      setMessage("최소 4명 이상 등록해야 합니다.");
-      return;
-    }
-
+  function generateSchedule() {
+    if (players.length < 4) return setMessage("최소 4명 이상 등록해 주세요.");
     try {
-      const meta = buildMeta(playersWithLiveScore);
-      const rounds = [];
-
-      for (let roundNo = 1; roundNo <= MAX_TOTAL_ROUNDS_SOFT; roundNo += 1) {
-        let bestMatches = [];
-        let bestPenalty = Infinity;
-
-        for (let tryCount = 0; tryCount < MAX_ROUND_TRIES; tryCount += 1) {
-          const result = pickBestRound(shuffle(playersWithLiveScore), meta, mode);
-          const penalty = getRoundPenalty(result);
-          if (
-            result.length > bestMatches.length ||
-            (result.length === bestMatches.length && penalty < bestPenalty)
-          ) {
-            bestMatches = result;
-            bestPenalty = penalty;
-          }
-          if (bestMatches.length >= TOTAL_COURTS && bestPenalty <= 20) break;
-        }
-
-        if (!bestMatches.length) break;
-        commitMatchesToMeta(bestMatches, meta);
-        rounds.push({ id: roundNo, matches: bestMatches });
-
-        const completed = playersWithLiveScore.every((p) => meta.playerStats[p.id].gamesPlayed >= p.maxGames);
-        if (completed) break;
+      if (mode === "league") {
+        const result = buildLeagueSchedule(players);
+        setSchedule(result.rounds);
+        setLeagueTeams(result.teams);
+        setTab("schedule");
+        setMessage(result.rounds.length ? `정기전 대진 생성 완료 (${result.teams.length}개 팀)` : "정기전 대진을 생성하지 못했습니다.");
+        return;
       }
-
-      setSchedule(rounds);
-      setActiveTab("schedule");
-
-      const unmetCount = playersWithLiveScore.filter((p) => meta.playerStats[p.id].gamesPlayed < p.maxGames).length;
-
-      if (!rounds.length) {
-        setMessage("대진을 생성하지 못했습니다. 인원, 성별, 급수, 참가종목, 소속팀 조건을 확인해 주세요.");
-      } else if (unmetCount > 0) {
-        setMessage(`대진 생성 완료 (${rounds.length}R). 일부 선수는 목표경기를 모두 채우지 못했습니다.`);
-      } else {
-        setMessage(`대진 생성 완료 (${rounds.length}R)`);
-      }
+      const result = generateGeneralSchedule(players, mode);
+      setSchedule(result.rounds);
+      setLeagueTeams([]);
+      setTab("schedule");
+      setMessage(result.rounds.length ? `대진 생성 완료 (${result.rounds.length}R)` : "대진을 생성하지 못했습니다.");
     } catch (e) {
       console.error(e);
       setMessage("대진 생성 중 오류가 발생했습니다.");
     }
-  };
+  }
 
-  const downloadExcel = () => {
-    if (!schedule.length) {
-      window.alert("생성된 대진표가 없습니다.");
-      return;
-    }
+  function updateLeagueScore(roundId, matchIndex, side, value) {
+    setSchedule((prev) => prev.map((round) => {
+      if (round.id !== roundId) return round;
+      return {
+        ...round,
+        matches: round.matches.map((m, idx) => idx === matchIndex ? { ...m, result: { ...m.result, [side]: value } } : m),
+      };
+    }));
+  }
 
+  function assignFixedPartner() {
+    const playerId = Number(selectedPlayerId);
+    const partnerId = Number(selectedPartnerId);
+    if (!playerId || !partnerId || playerId === partnerId) return setMessage("선수 2명을 올바르게 선택해 주세요.");
+    const player = players.find((p) => p.id === playerId);
+    const partner = players.find((p) => p.id === partnerId);
+    if (!player || !partner) return setMessage("선수를 다시 선택해 주세요.");
+    setPlayers((prev) => prev.map((p) => {
+      if (p.id === playerId) return { ...p, fixedPartnerId: partnerId };
+      if (p.id === partnerId) return { ...p, fixedPartnerId: playerId };
+      return p;
+    }));
+    resetModeOutput();
+    setMessage(`고정 파트너 지정 완료: ${player.name} / ${partner.name}`);
+  }
+
+  function clearFixedPartner(playerId) {
+    const player = players.find((p) => p.id === playerId);
+    const partnerId = player?.fixedPartnerId;
+    setPlayers((prev) => prev.map((p) => {
+      if (p.id === playerId) return { ...p, fixedPartnerId: null };
+      if (partnerId && p.id === partnerId) return { ...p, fixedPartnerId: null };
+      return p;
+    }));
+    resetModeOutput();
+  }
+
+  function addManualLeaguePlacement() {
+    const playerId = Number(selectedPlayerId);
+    if (!playerId || !manualTargetTeam) return setMessage("선수와 대상 팀을 선택해 주세요.");
+    setPlayers((prev) => prev.map((p) => p.id === playerId ? { ...p, leagueTargetTeam: manualTargetTeam, leagueManualPool: true } : p));
+    resetModeOutput();
+    setMessage("수동 팀 배정 설정 완료 (정기전 팀 밸런스 예외)");
+  }
+
+  function clearManualLeaguePlacement(playerId) {
+    setPlayers((prev) => prev.map((p) => p.id === playerId ? { ...p, leagueTargetTeam: "", leagueManualPool: false } : p));
+    resetModeOutput();
+  }
+
+  function downloadExcel() {
+    if (!schedule.length) return window.alert("생성된 대진표가 없습니다.");
     const rows = [];
+    if (mode === "league") {
+      Object.entries(leagueStandings).forEach(([teamName, teamRows]) => {
+        rows.push({ 구분: `${teamName} 순위표` });
+        teamRows.forEach((row, idx) => {
+          rows.push({
+            순위: idx + 1,
+            팀: teamName,
+            조: row.label,
+            선수: `${row.players[0]?.name || ""} / ${row.players[1]?.name || ""}`,
+            경기수: row.played,
+            승: row.wins,
+            무: row.draws,
+            패: row.losses,
+            득점: row.pointsFor,
+            실점: row.pointsAgainst,
+            득실차: row.diff,
+            승점: row.leaguePoints,
+          });
+        });
+        rows.push({});
+      });
+    }
     schedule.forEach((round) => {
-      round.matches.forEach((match) => {
-        rows.push({
-          모드: MODES.find((m) => m.value === mode)?.label,
+      round.matches.forEach((m) => {
+        rows.push(mode === "league" ? {
+          구분: "정기전",
+          라운드: `${round.groupName} ${round.internalRound}R`,
+          코트: `${m.courtId}코트`,
+          경기: m.label,
+          A조: `${m.pairA.label} (${m.pairA.players.map((p) => p.name).join(" / ")})`,
+          B조: `${m.pairB.label} (${m.pairB.players.map((p) => p.name).join(" / ")})`,
+          예측합A: m.scoreA.toFixed(1),
+          예측합B: m.scoreB.toFixed(1),
+          실제점수A: m.result?.a ?? "",
+          실제점수B: m.result?.b ?? "",
+        } : {
+          구분: MODES.find((x) => x.value === mode)?.label,
           라운드: `${round.id}R`,
-          코트: `${match.courtId}코트`,
-          경기유형: match.matchLabel,
-          팀A: `${match.teamA[0].name} / ${match.teamA[1].name}`,
-          팀B: `${match.teamB[0].name} / ${match.teamB[1].name}`,
-          팀A합점: match.scoreA.toFixed(1),
-          팀B합점: match.scoreB.toFixed(1),
-          점수차: match.diff.toFixed(1),
+          코트: `${m.courtId}코트`,
+          경기: m.label,
+          팀A: `${m.teamA[0].name} / ${m.teamA[1].name}`,
+          팀B: `${m.teamB[0].name} / ${m.teamB[1].name}`,
+          점수A: m.scoreA.toFixed(1),
+          점수B: m.scoreB.toFixed(1),
+          차이: m.diff.toFixed(1),
         });
       });
       rows.push({});
     });
-
-    const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
     XLSX.utils.book_append_sheet(wb, ws, "대진표");
-    XLSX.writeFile(wb, `BADMONKEYZ_대진표_${getKoreanDateString()}.xlsx`);
-  };
+    XLSX.writeFile(wb, `BADMONKEYZ_대진표_${dateStamp()}.xlsx`);
+  }
 
-  const downloadScheduleImage = async () => {
+  async function downloadImage() {
     if (!scheduleRef.current) return;
     try {
       const node = scheduleRef.current;
       const dataUrl = await toPng(node, {
         cacheBust: true,
-        pixelRatio: 2.5,
+        pixelRatio: 2.2,
         backgroundColor: "#f8fafc",
-        skipFonts: false,
         width: node.scrollWidth,
         height: node.scrollHeight,
-        canvasWidth: node.scrollWidth,
-        canvasHeight: node.scrollHeight,
       });
       const link = document.createElement("a");
-      link.download = `BADMONKEYZ_대진표_${getKoreanDateString()}.png`;
+      link.download = `BADMONKEYZ_대진표_${dateStamp()}.png`;
       link.href = dataUrl;
       link.click();
     } catch (e) {
       console.error(e);
       setMessage("이미지 저장 중 오류가 발생했습니다.");
     }
-  };
+  }
 
-  const modeAllows = {
-    team: mode === "rivalry",
-    events: mode === "tournament",
-  };
-
-  const renderEventChecks = (player, onChange, compact = false) => {
-    const items = [
-      { key: "nam", label: "남복", disabled: player.gender !== "남" },
-      { key: "yeo", label: "여복", disabled: player.gender !== "여" },
-      { key: "hon", label: "혼복", disabled: false },
-    ];
-
-    return (
-      <div style={{ display: "flex", gap: compact ? 12 : 16, flexWrap: "wrap", fontSize: compact ? 13 : 12 }}>
-        {items.map((item) => (
-          <label key={item.key} style={{ display: "inline-flex", gap: 6, alignItems: "center", opacity: item.disabled ? 0.45 : 1 }}>
-            <input
-              type="checkbox"
-              checked={!!player.events[item.key]}
-              disabled={item.disabled}
-              onChange={(e) => onChange(item.key, e.target.checked)}
-            />
-            <span>{item.label}</span>
-          </label>
-        ))}
-      </div>
-    );
-  };
-
-  const headerSummary = (
-    <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
-      <Pill tone="indigo">현재 모드: {MODES.find((m) => m.value === mode)?.label}</Pill>
-      <Pill tone="slate">인원 {players.length}명</Pill>
-      <Pill tone="blue">남 {countByGender("남")}명</Pill>
-      <Pill tone="pink">여 {countByGender("여")}명</Pill>
-      {mode === "rivalry" && (
-        <>
-          <Pill tone="orange">홈팀 {countByTeam("홈팀")}명</Pill>
-          <Pill tone="orange">원정팀 {countByTeam("원정팀")}명</Pill>
-        </>
-      )}
-      <Pill tone="green">이론상 최대 {theoreticalRounds}R</Pill>
-    </div>
-  );
+  const teamCandidates = useMemo(() => {
+    const base = AGE_BANDS.map((age) => `${age}팀`);
+    return [...base, "소수남성팀", "소수여성팀", "소수혼합팀"];
+  }, []);
 
   if (homeMode) {
     return (
       <div style={styles.page}>
-        <div style={styles.container}>
-          <HomePage
-            onSelectMode={(value) => {
-              setMode(value);
-              setHomeMode(false);
-            }}
-          />
+        <div style={styles.shell}>
+          <div style={{ ...styles.card, padding: 28 }}>
+            <div style={{ fontSize: 42, fontWeight: 950, color: "#312e81" }}>BADMONKEYZ</div>
+            <div style={{ marginTop: 8, color: "#475569", lineHeight: 1.7 }}>친선전 / 대회 / 대항전 / 정기전을 하나의 화면에서 관리할 수 있는 통합 App.jsx 버전이야.</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 14, marginTop: 22 }}>
+              {MODES.map((m) => (
+                <button
+                  key={m.value}
+                  onClick={() => { setMode(m.value); setHomeMode(false); }}
+                  style={{ ...styles.button, padding: 20, textAlign: "left", background: "linear-gradient(135deg,#ffffff 0%,#eef2ff 100%)", border: "1px solid #dbeafe" }}
+                >
+                  <div style={{ fontSize: 30 }}>{m.icon}</div>
+                  <div style={{ marginTop: 8, fontSize: 22, fontWeight: 900 }}>{m.label}</div>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -1248,479 +961,318 @@ function App() {
 
   return (
     <div style={styles.page}>
-      <div style={styles.container}>
-        <input ref={uploadInputRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }} onChange={handleExcelUpload} />
+      <div style={styles.shell}>
+        <input ref={uploadRef} type="file" accept=".xlsx,.xls" onChange={handleExcelUpload} style={{ display: "none" }} />
 
-        <div
-          style={{
-            ...Card,
-            borderRadius: 30,
-            overflow: "hidden",
-            background: "rgba(255,255,255,0.92)",
-            boxShadow: "0 16px 48px rgba(30, 41, 59, 0.10)",
-            marginBottom: 18,
-          }}
-        >
-          <div
-            style={{
-              position: "relative",
-              overflow: "hidden",
-              borderRadius: 30,
-              background: `linear-gradient(135deg, rgba(255,255,255,.95) 0%, rgba(255,255,255,.80) 100%)`,
-              padding: isMobile ? 18 : 26,
-            }}
-          >
-            <div style={{ position: "absolute", right: -20, top: -10, fontSize: isMobile ? 90 : 160, fontWeight: 900, color: "rgba(79,70,229,.04)" }}>
-              BAD
+        <div style={{ ...styles.card, padding: 18, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <button onClick={() => setHomeMode(true)} style={{ ...styles.button, background: "#fff", border: "1px solid #cbd5e1", marginBottom: 10 }}>← HOME</button>
+              <div style={{ fontSize: 30, fontWeight: 950, color: "#1e1b4b" }}>{MODES.find((m) => m.value === mode)?.icon} {MODES.find((m) => m.value === mode)?.label}</div>
+              <div style={{ marginTop: 6, color: "#475569" }}>인원 {players.length}명 / 남 {countMale}명 / 여 {countFemale}명</div>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 14, alignItems: isMobile ? "flex-start" : "center", flexWrap: "wrap", position: "relative" }}>
-              <div>
-                <Button variant="modeBack" onClick={() => setHomeMode(true)} style={{ marginBottom: 16 }}>
-                  ← HOME
-                </Button>
-                <div style={{ fontSize: isMobile ? 16 : 18, fontWeight: 900, color: modeTheme.text }}>🐵🏸 BADMONKEYZ</div>
-                <div style={{ marginTop: 4, fontSize: isMobile ? 28 : 40, fontWeight: 950, color: "#1e1b4b", lineHeight: 1.05 }}>{modeInfo.title}</div>
-                <div style={{ marginTop: 8, color: "#475569", fontWeight: 700 }}>{modeInfo.short}</div>
-                {headerSummary}
-              </div>
-              {!isMobile && (
-                <div
-                  style={{
-                    minWidth: 250,
-                    borderRadius: 26,
-                    padding: 18,
-                    background: modeTheme.soft,
-                    border: `1px solid ${modeTheme.border}`,
-                    boxShadow: "inset 0 1px 0 rgba(255,255,255,.85)",
-                  }}
-                >
-                  <div style={{ fontSize: 30 }}>{MODES.find((m) => m.value === mode)?.icon}</div>
-                  <div style={{ marginTop: 10, fontWeight: 900, fontSize: 18, color: modeTheme.text }}>{MODES.find((m) => m.value === mode)?.label}</div>
-                  <div style={{ marginTop: 8, color: "#475569", lineHeight: 1.7 }}>{modeInfo.description}</div>
-                </div>
-              )}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {MODES.map((m) => (
+                <button key={m.value} onClick={() => { setMode(m.value); resetModeOutput(); }} style={{ ...styles.button, background: mode === m.value ? "linear-gradient(135deg,#6366f1 0%,#3b82f6 100%)" : "#fff", color: mode === m.value ? "#fff" : "#334155", border: mode === m.value ? "none" : "1px solid #cbd5e1" }}>{m.label}</button>
+              ))}
             </div>
           </div>
         </div>
 
-        {message && (
-          <div
-            style={{
-              ...styles.card,
-              marginBottom: 16,
-              background: "linear-gradient(135deg, #eff6ff 0%, #eef2ff 100%)",
-              border: "1px solid #dbeafe",
-              padding: "14px 16px",
-              color: "#1d4ed8",
-              fontWeight: 700,
-            }}
-          >
-            {message}
-          </div>
-        )}
+        {message && <div style={{ ...styles.card, padding: 14, marginBottom: 16, color: "#1d4ed8", background: "linear-gradient(135deg,#eff6ff 0%,#eef2ff 100%)" }}>{message}</div>}
 
-        <div style={{ display: "flex", justifyContent: "center", marginBottom: 18 }}>
-          <div
-            style={{
-              display: "inline-flex",
-              gap: 8,
-              padding: 8,
-              borderRadius: 22,
-              background: "rgba(255,255,255,0.86)",
-              border: "1px solid rgba(255,255,255,0.95)",
-              boxShadow: "0 12px 28px rgba(15, 23, 42, .06)",
-              flexWrap: "wrap",
-            }}
-          >
-            <button
-              onClick={() => setActiveTab("players")}
-              style={{
-                ...styles.button,
-                background: activeTab === "players" ? modeTheme.button : "transparent",
-                color: activeTab === "players" ? "white" : "#475569",
-                minWidth: isMobile ? 140 : 180,
-              }}
-            >
-              선수 관리 ({players.length})
-            </button>
-            <button
-              onClick={() => setActiveTab("schedule")}
-              style={{
-                ...styles.button,
-                background: activeTab === "schedule" ? modeTheme.button : "transparent",
-                color: activeTab === "schedule" ? "white" : "#475569",
-                minWidth: isMobile ? 140 : 180,
-              }}
-            >
-              대진표 ({schedule.length}R)
-            </button>
-          </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          <button onClick={() => setTab("players")} style={{ ...styles.button, background: tab === "players" ? "#312e81" : "#fff", color: tab === "players" ? "#fff" : "#334155", border: tab === "players" ? "none" : "1px solid #cbd5e1" }}>선수 관리</button>
+          <button onClick={() => setTab("schedule")} style={{ ...styles.button, background: tab === "schedule" ? "#312e81" : "#fff", color: tab === "schedule" ? "#fff" : "#334155", border: tab === "schedule" ? "none" : "1px solid #cbd5e1" }}>대진표</button>
         </div>
 
-        {activeTab === "players" && (
-          <div style={{ display: "grid", gap: 18 }}>
-            <SectionCard
+        {tab === "players" && (
+          <div style={{ display: "grid", gap: 16 }}>
+            <Section
               title="선수 등록"
               right={
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <Button variant="excel" onClick={downloadTemplate}>📄 템플릿</Button>
-                  <Button variant="secondary" onClick={triggerExcelUpload}>📥 엑셀 불러오기</Button>
+                  <button onClick={downloadTemplate} style={{ ...styles.button, background: "#16a34a", color: "#fff" }}>📄 템플릿</button>
+                  <button onClick={() => uploadRef.current?.click()} style={{ ...styles.button, background: "#fff", border: "1px solid #cbd5e1" }}>📥 엑셀 업로드</button>
                 </div>
               }
             >
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "repeat(12, 1fr)",
-                  gap: 14,
-                }}
-              >
-                <div style={{ gridColumn: isMobile ? undefined : "span 3" }}>
-                  <label style={styles.label}>이름</label>
-                  <Input
-                    value={playerForm.name}
-                    placeholder="이름 입력"
-                    onChange={(e) => setPlayerForm((prev) => ({ ...prev, name: e.target.value }))}
-                    onKeyDown={(e) => e.key === "Enter" && addPlayer()}
-                  />
-                </div>
-                <div style={{ gridColumn: isMobile ? undefined : "span 2" }}>
-                  <label style={styles.label}>성별</label>
-                  <Select value={playerForm.gender} onChange={(e) => changeGenderInForm(e.target.value)}>
-                    {GENDERS.map((g) => (
-                      <option key={g} value={g}>{g}</option>
-                    ))}
-                  </Select>
-                </div>
-                <div style={{ gridColumn: isMobile ? undefined : "span 2" }}>
-                  <label style={styles.label}>급수</label>
-                  <Select value={playerForm.grade} onChange={(e) => setPlayerForm((prev) => ({ ...prev, grade: e.target.value }))}>
-                    {GRADES.map((g) => (
-                      <option key={g} value={g}>{g}</option>
-                    ))}
-                  </Select>
-                </div>
-                <div style={{ gridColumn: isMobile ? undefined : "span 2" }}>
-                  <label style={styles.label}>목표경기</label>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={MAX_GAMES}
-                    value={playerForm.maxGames}
-                    onChange={(e) =>
-                      setPlayerForm((prev) => ({
-                        ...prev,
-                        maxGames: clampInt(Number(e.target.value || DEFAULT_MAX_GAMES), 1, MAX_GAMES),
-                      }))
-                    }
-                  />
-                </div>
-                <div style={{ gridColumn: isMobile ? undefined : "span 3" }}>
-                  <label style={styles.label}>커스텀점수 (선택)</label>
-                  <Input
-                    type="number"
-                    step="0.1"
-                    placeholder="비우면 기본점수"
-                    value={playerForm.customScore}
-                    onChange={(e) => setPlayerForm((prev) => ({ ...prev, customScore: e.target.value }))}
-                  />
-                </div>
-
-                {modeAllows.team && (
-                  <div style={{ gridColumn: isMobile ? undefined : "span 3" }}>
-                    <label style={styles.label}>소속팀 (대항전용)</label>
-                    <Select value={playerForm.team} onChange={(e) => setPlayerForm((prev) => ({ ...prev, team: e.target.value }))}>
-                      {TEAMS.map((t) => (
-                        <option key={t} value={t}>{t}</option>
-                      ))}
-                    </Select>
-                  </div>
-                )}
-
-                {modeAllows.events && (
-                  <div style={{ gridColumn: isMobile ? undefined : "span 6" }}>
-                    <label style={styles.label}>참가종목 (대회 모드용)</label>
-                    <div style={{ borderRadius: 18, border: "1px solid #dbeafe", background: "#f8fbff", padding: "13px 14px" }}>
-                      {renderEventChecks(
-                        playerForm,
-                        (key, checked) =>
-                          setPlayerForm((prev) => ({
-                            ...prev,
-                            events: normalizeEventsByGender(prev.gender, { ...prev.events, [key]: checked }),
-                          })),
-                        true
-                      )}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12 }}>
+                <div><div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>이름</div><input style={styles.input} value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} /></div>
+                <div><div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>성별</div><select style={styles.input} value={form.gender} onChange={(e) => setForm((p) => ({ ...p, gender: e.target.value, events: normalizeEventsByGender(e.target.value, p.events) }))}>{GENDERS.map((g) => <option key={g}>{g}</option>)}</select></div>
+                <div><div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>급수</div><select style={styles.input} value={form.grade} onChange={(e) => setForm((p) => ({ ...p, grade: e.target.value }))}>{GRADES.map((g) => <option key={g}>{g}</option>)}</select></div>
+                <div><div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>연령대</div><select style={styles.input} value={form.ageBand} onChange={(e) => setForm((p) => ({ ...p, ageBand: e.target.value }))}>{AGE_BANDS.map((a) => <option key={a}>{a}</option>)}</select></div>
+                <div><div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>목표경기</div><input type="number" style={styles.input} value={form.maxGames} onChange={(e) => setForm((p) => ({ ...p, maxGames: clamp(e.target.value || 3, 1, 20) }))} /></div>
+                <div><div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>커스텀점수</div><input type="number" step="0.1" style={styles.input} value={form.customScore} onChange={(e) => setForm((p) => ({ ...p, customScore: e.target.value }))} placeholder="선택" /></div>
+                {mode === "rivalry" && <div><div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>소속팀</div><select style={styles.input} value={form.rivalryTeam} onChange={(e) => setForm((p) => ({ ...p, rivalryTeam: e.target.value }))}>{RIVALRY_TEAMS.map((t) => <option key={t}>{t}</option>)}</select></div>}
+                {mode === "tournament" && (
+                  <div style={{ gridColumn: "1 / -1" }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>참가 종목</div>
+                    <div style={{ display: "flex", gap: 14, flexWrap: "wrap", padding: 12, border: "1px solid #cbd5e1", borderRadius: 14 }}>
+                      <label><input type="checkbox" checked={form.events.nam} disabled={form.gender !== "남"} onChange={(e) => setForm((p) => ({ ...p, events: normalizeEventsByGender(p.gender, { ...p.events, nam: e.target.checked }) }))} /> 남복</label>
+                      <label><input type="checkbox" checked={form.events.yeo} disabled={form.gender !== "여"} onChange={(e) => setForm((p) => ({ ...p, events: normalizeEventsByGender(p.gender, { ...p.events, yeo: e.target.checked }) }))} /> 여복</label>
+                      <label><input type="checkbox" checked={form.events.hon} onChange={(e) => setForm((p) => ({ ...p, events: normalizeEventsByGender(p.gender, { ...p.events, hon: e.target.checked }) }))} /> 혼복</label>
                     </div>
                   </div>
                 )}
-
-                <div style={{ gridColumn: isMobile ? undefined : modeAllows.events || modeAllows.team ? "span 3" : "span 2", display: "flex", alignItems: "end" }}>
-                  <Button variant="success" onClick={addPlayer} style={{ width: "100%", minHeight: 48 }}>➕ 선수 추가</Button>
-                </div>
+                <div style={{ alignSelf: "end" }}><button onClick={addPlayer} style={{ ...styles.button, background: "linear-gradient(135deg,#22c55e 0%,#16a34a 100%)", color: "#fff", width: "100%" }}>➕ 선수 추가</button></div>
               </div>
-            </SectionCard>
 
-            <SectionCard
+              {mode === "league" && (
+                <div style={{ marginTop: 14, borderRadius: 16, padding: 12, background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534", lineHeight: 1.65 }}>
+                  정기전은 연령대 자체가 팀이 된다. 20대팀/30대팀/40대팀/50대팀/60대팀 형태로 구성하고, 팀 내부의 성비에 따라 남복/여복/혼복 한 가지 방식으로만 운영한다. 팀 인원이 부족하면 다른 팀에서 보충하고, 소수 성별은 별도 소수 팀으로 묶는다.
+                </div>
+              )}
+            </Section>
+
+            {uploadSummary && (
+              <div style={{ ...styles.card, padding: 14, background: "#ecfdf5", border: "1px solid #bbf7d0", color: "#166534" }}>
+                총 {uploadSummary.total}행 / 성공 {uploadSummary.success}행 / 실패 {uploadSummary.failed}행
+                {!!uploadSummary.failures?.length && <div style={{ marginTop: 8, fontSize: 13 }}>{uploadSummary.failures.map((f, i) => <div key={i}>- {f.rowNo}행: {f.reason}</div>)}</div>}
+              </div>
+            )}
+
+            {mode === "league" && (
+              <Section title="정기전 수동 설정">
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>선수 선택</div>
+                    <select style={styles.input} value={selectedPlayerId} onChange={(e) => setSelectedPlayerId(e.target.value)}>
+                      <option value="">선수 선택</option>
+                      {players.map((p) => <option key={p.id} value={p.id}>{p.name} / {p.ageBand} / {p.gender}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>수동 팀 배정</div>
+                    <select style={styles.input} value={manualTargetTeam} onChange={(e) => setManualTargetTeam(e.target.value)}>
+                      <option value="">대상 팀 선택</option>
+                      {teamCandidates.map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ alignSelf: "end" }}>
+                    <button onClick={addManualLeaguePlacement} style={{ ...styles.button, background: "#f59e0b", color: "#fff", width: "100%" }}>수동 팀 배정</button>
+                  </div>
+                </div>
+                <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>파트너 선수 1</div>
+                    <select style={styles.input} value={selectedPlayerId} onChange={(e) => setSelectedPlayerId(e.target.value)}>
+                      <option value="">선수 선택</option>
+                      {players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>파트너 선수 2</div>
+                    <select style={styles.input} value={selectedPartnerId} onChange={(e) => setSelectedPartnerId(e.target.value)}>
+                      <option value="">선수 선택</option>
+                      {players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ alignSelf: "end" }}>
+                    <button onClick={assignFixedPartner} style={{ ...styles.button, background: "#6366f1", color: "#fff", width: "100%" }}>고정 파트너 지정</button>
+                  </div>
+                </div>
+              </Section>
+            )}
+
+            <Section
               title={`선수 목록 (${players.length}명)`}
-              right={
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <Button onClick={generateSchedule}>🚀 대진표 생성</Button>
-                  <Button variant="secondary" onClick={() => setActiveTab("schedule")}>🏆 결과 보기</Button>
-                  <Button variant="danger" onClick={resetAllPlayers}>🗑 전체 초기화</Button>
-                </div>
-              }
+              right={<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}><button onClick={generateSchedule} style={{ ...styles.button, background: "linear-gradient(135deg,#6366f1 0%,#3b82f6 100%)", color: "#fff" }}>🚀 대진표 생성</button><button onClick={resetPlayers} style={{ ...styles.button, background: "#ef4444", color: "#fff" }}>🗑 전체 초기화</button></div>}
             >
-              {uploadSummary && (
-                <div
-                  style={{
-                    marginBottom: 14,
-                    borderRadius: 18,
-                    background: "#ecfdf5",
-                    border: "1px solid #bbf7d0",
-                    padding: "12px 14px",
-                    color: "#166534",
-                    fontSize: 14,
-                    lineHeight: 1.6,
-                  }}
-                >
-                  총 {uploadSummary.total}행 / 성공 {uploadSummary.success}행 / 실패 {uploadSummary.failed}행
-                  {uploadSummary.failures?.length > 0 && (
-                    <div style={{ marginTop: 6, fontSize: 13 }}>
-                      {uploadSummary.failures.map((f, idx) => (
-                        <div key={idx}>- {f.rowNo}행: {f.reason}</div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {!isMobile ? (
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: 0, minWidth: 900 }}>
-                    <thead>
-                      <tr style={{ textAlign: "left", fontSize: 12, color: "#64748b" }}>
-                        {[
-                          "이름",
-                          "성별",
-                          "급수",
-                          "기본점수",
-                          "커스텀점수",
-                          "적용점수",
-                          "목표경기",
-                          ...(modeAllows.team ? ["소속팀"] : []),
-                          ...(modeAllows.events ? ["참가종목"] : []),
-                          "삭제",
-                        ].map((head) => (
-                          <th key={head} style={{ padding: "12px 10px", borderBottom: "1px solid #eef2ff" }}>{head}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {playersWithLiveScore.map((p) => (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1080 }}>
+                  <thead>
+                    <tr>
+                      {["이름", "성별", "급수", "연령대", "기본점수", "커스텀", "적용점수", "목표경기", ...(mode === "rivalry" ? ["소속팀"] : []), ...(mode === "league" ? ["수동팀", "고정파트너"] : []), ...(mode === "tournament" ? ["참가종목"] : []), "삭제"].map((h) => <th key={h} style={styles.th}>{h}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {players.map((p) => {
+                      const partner = players.find((x) => x.id === p.fixedPartnerId);
+                      return (
                         <tr key={p.id}>
-                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9", fontWeight: 900 }}>{p.name}</td>
-                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
-                            <Pill tone={p.gender === "남" ? "blue" : "pink"}>{p.gender}</Pill>
-                          </td>
-                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>{p.grade}</td>
-                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9", color: "#64748b" }}>{getBaseScore(p.grade, p.gender)}</td>
-                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
-                            <Input
-                              type="number"
-                              step="0.1"
-                              style={{ width: 92 }}
-                              value={p.customScore ?? ""}
-                              onChange={(e) => updatePlayerField(p.id, { customScore: e.target.value === "" ? null : Number(e.target.value) })}
-                            />
-                          </td>
-                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9", fontWeight: 900 }}>{p.liveScore}</td>
-                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
-                            <Input
-                              type="number"
-                              min={1}
-                              max={MAX_GAMES}
-                              style={{ width: 90 }}
-                              value={p.maxGames}
-                              onChange={(e) => updatePlayerField(p.id, { maxGames: clampInt(Number(e.target.value || DEFAULT_MAX_GAMES), 1, MAX_GAMES) })}
-                            />
-                          </td>
-                          {modeAllows.team && (
-                            <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
-                              <Select value={p.team} onChange={(e) => updatePlayerField(p.id, { team: e.target.value })}>
-                                {TEAMS.map((t) => (
-                                  <option key={t} value={t}>{t}</option>
-                                ))}
-                              </Select>
-                            </td>
+                          <td style={styles.td}><b>{p.name}</b></td>
+                          <td style={styles.td}><Pill tone={p.gender === "남" ? "blue" : "pink"}>{p.gender}</Pill></td>
+                          <td style={styles.td}>{p.grade}</td>
+                          <td style={styles.td}><Pill tone="green">{p.ageBand}</Pill></td>
+                          <td style={styles.td}>{getBaseScore(p.grade, p.gender)}</td>
+                          <td style={styles.td}><input type="number" step="0.1" style={{ ...styles.input, width: 90 }} value={p.customScore ?? ""} onChange={(e) => updatePlayer(p.id, { customScore: e.target.value === "" ? null : Number(e.target.value) })} /></td>
+                          <td style={styles.td}><b>{getPlayerScore(p)}</b></td>
+                          <td style={styles.td}><input type="number" style={{ ...styles.input, width: 90 }} value={p.maxGames} onChange={(e) => updatePlayer(p.id, { maxGames: clamp(e.target.value || 3, 1, 20) })} /></td>
+                          {mode === "rivalry" && <td style={styles.td}><select style={styles.input} value={p.rivalryTeam} onChange={(e) => updatePlayer(p.id, { rivalryTeam: e.target.value })}>{RIVALRY_TEAMS.map((t) => <option key={t}>{t}</option>)}</select></td>}
+                          {mode === "league" && (
+                            <>
+                              <td style={styles.td}>
+                                {p.leagueTargetTeam ? (
+                                  <div style={{ display: "grid", gap: 6 }}>
+                                    <Pill tone="orange">{p.leagueTargetTeam}</Pill>
+                                    <button onClick={() => clearManualLeaguePlacement(p.id)} style={{ ...styles.button, background: "#fff", border: "1px solid #cbd5e1", padding: "6px 8px", fontSize: 12 }}>해제</button>
+                                  </div>
+                                ) : "-"}
+                              </td>
+                              <td style={styles.td}>
+                                {partner ? (
+                                  <div style={{ display: "grid", gap: 6 }}>
+                                    <Pill tone="indigo">{partner.name}</Pill>
+                                    <button onClick={() => clearFixedPartner(p.id)} style={{ ...styles.button, background: "#fff", border: "1px solid #cbd5e1", padding: "6px 8px", fontSize: 12 }}>해제</button>
+                                  </div>
+                                ) : "-"}
+                              </td>
+                            </>
                           )}
-                          {modeAllows.events && (
-                            <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
-                              {renderEventChecks(p, (key, checked) =>
-                                updatePlayerField(p.id, {
-                                  events: normalizeEventsByGender(p.gender, { ...p.events, [key]: checked }),
-                                })
-                              )}
-                            </td>
-                          )}
-                          <td style={{ padding: "14px 10px", borderBottom: "1px solid #f1f5f9" }}>
-                            <button onClick={() => deletePlayer(p.id)} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 20, color: "#94a3b8" }}>✕</button>
-                          </td>
+                          {mode === "tournament" && <td style={styles.td}><div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}><label><input type="checkbox" checked={p.events.nam} disabled={p.gender !== "남"} onChange={(e) => updatePlayer(p.id, { events: normalizeEventsByGender(p.gender, { ...p.events, nam: e.target.checked }) })} /> 남복</label><label><input type="checkbox" checked={p.events.yeo} disabled={p.gender !== "여"} onChange={(e) => updatePlayer(p.id, { events: normalizeEventsByGender(p.gender, { ...p.events, yeo: e.target.checked }) })} /> 여복</label><label><input type="checkbox" checked={p.events.hon} onChange={(e) => updatePlayer(p.id, { events: normalizeEventsByGender(p.gender, { ...p.events, hon: e.target.checked }) })} /> 혼복</label></div></td>}
+                          <td style={styles.td}><button onClick={() => removePlayer(p.id)} style={{ ...styles.button, background: "transparent", color: "#ef4444", padding: 0 }}>✕</button></td>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div style={{ display: "grid", gap: 12 }}>
-                  {playersWithLiveScore.map((p) => {
-                    const expanded = editingId === p.id;
-                    return (
-                      <div key={p.id} style={{ borderRadius: 22, border: "1px solid #e2e8f0", padding: 16, background: "white", boxShadow: "0 10px 24px rgba(15,23,42,.04)" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
-                          <div>
-                            <div style={{ fontSize: 22, fontWeight: 900 }}>{p.name}</div>
-                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                              <Pill tone={p.gender === "남" ? "blue" : "pink"}>{p.gender}</Pill>
-                              <Pill tone="indigo">{p.grade}급</Pill>
-                              {modeAllows.team && <Pill tone="orange">{p.team}</Pill>}
-                            </div>
-                          </div>
-                          <div style={{ display: "flex", gap: 8 }}>
-                            <button onClick={() => setEditingId(expanded ? null : p.id)} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 18 }}>✏️</button>
-                            <button onClick={() => deletePlayer(p.id)} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 18 }}>🗑</button>
-                          </div>
-                        </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, marginTop: 14 }}>
-                          <div style={{ borderRadius: 16, background: "#f8fafc", padding: 12 }}>
-                            <div style={{ color: "#64748b", fontSize: 12, fontWeight: 700 }}>적용점수</div>
-                            <div style={{ marginTop: 4, fontSize: 20, fontWeight: 900 }}>{p.liveScore}</div>
-                          </div>
-                          <div style={{ borderRadius: 16, background: "#f8fafc", padding: 12 }}>
-                            <div style={{ color: "#64748b", fontSize: 12, fontWeight: 700 }}>목표경기</div>
-                            <div style={{ marginTop: 4, fontSize: 20, fontWeight: 900 }}>{p.maxGames}회</div>
-                          </div>
-                        </div>
-                        {expanded && (
-                          <div style={{ marginTop: 14, display: "grid", gap: 12, borderTop: "1px solid #eef2ff", paddingTop: 14 }}>
-                            <div>
-                              <label style={styles.label}>커스텀점수</label>
-                              <Input type="number" step="0.1" value={p.customScore ?? ""} onChange={(e) => updatePlayerField(p.id, { customScore: e.target.value === "" ? null : Number(e.target.value) })} />
-                            </div>
-                            <div>
-                              <label style={styles.label}>목표경기</label>
-                              <Input type="number" min={1} max={MAX_GAMES} value={p.maxGames} onChange={(e) => updatePlayerField(p.id, { maxGames: clampInt(Number(e.target.value || DEFAULT_MAX_GAMES), 1, MAX_GAMES) })} />
-                            </div>
-                            {modeAllows.team && (
-                              <div>
-                                <label style={styles.label}>소속팀</label>
-                                <Select value={p.team} onChange={(e) => updatePlayerField(p.id, { team: e.target.value })}>
-                                  {TEAMS.map((t) => (
-                                    <option key={t} value={t}>{t}</option>
-                                  ))}
-                                </Select>
-                              </div>
-                            )}
-                            {modeAllows.events && (
-                              <div>
-                                <label style={styles.label}>참가종목</label>
-                                {renderEventChecks(p, (key, checked) =>
-                                  updatePlayerField(p.id, { events: normalizeEventsByGender(p.gender, { ...p.events, [key]: checked }) }), true
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </SectionCard>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Section>
           </div>
         )}
 
-        {activeTab === "schedule" && (
-          <div style={{ display: "grid", gap: 18 }}>
+        {tab === "schedule" && (
+          <div style={{ display: "grid", gap: 16 }}>
             {!schedule.length ? (
-              <div style={{ ...styles.sectionCard, padding: "34px 18px", textAlign: "center" }}>
-                <div style={{ fontSize: 28 }}>🐵</div>
-                <div style={{ marginTop: 10, fontSize: 20, fontWeight: 900, color: "#334155" }}>생성된 대진표가 없습니다.</div>
-                <div style={{ marginTop: 8, color: "#64748b" }}>먼저 선수 등록 후 대진표를 생성해 주세요.</div>
-                <div style={{ marginTop: 18 }}>
-                  <Button variant="secondary" onClick={() => setActiveTab("players")}>선수 관리로 이동</Button>
-                </div>
+              <div style={{ ...styles.card, padding: 28, textAlign: "center" }}>
+                <div style={{ fontSize: 22, fontWeight: 900 }}>생성된 대진표가 없습니다.</div>
+                <div style={{ marginTop: 8, color: "#64748b" }}>선수 등록 후 대진표를 생성해 주세요.</div>
               </div>
             ) : (
               <>
-                <SectionCard
-                  title="매칭 결과"
-                  right={
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <Button onClick={generateSchedule}>🔄 재생성</Button>
-                      <Button variant="excel" onClick={downloadExcel}>📊 엑셀 저장</Button>
-                      <Button variant="secondary" onClick={downloadScheduleImage}>🖼 이미지 저장</Button>
-                    </div>
-                  }
-                >
-                  <div style={{ color: "#475569", fontWeight: 700 }}>
-                    BADMONKEYZ {MODES.find((m) => m.value === mode)?.label} / 총 {schedule.length}R
-                  </div>
-                </SectionCard>
+                <Section title="매칭 결과" right={<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}><button onClick={generateSchedule} style={{ ...styles.button, background: "linear-gradient(135deg,#6366f1 0%,#3b82f6 100%)", color: "#fff" }}>🔄 재생성</button><button onClick={downloadExcel} style={{ ...styles.button, background: "#16a34a", color: "#fff" }}>📊 엑셀 저장</button><button onClick={downloadImage} style={{ ...styles.button, background: "#fff", border: "1px solid #cbd5e1" }}>🖼 이미지 저장</button></div>}>
+                  <div style={{ color: "#475569" }}>모드: {MODES.find((m) => m.value === mode)?.label} / 라운드 {schedule.length}개</div>
+                </Section>
+
+                {mode === "league" && !!leagueTeams.length && (
+                  <>
+                    <Section title="정기전 팀 구성">
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 14 }}>
+                        {leagueTeams.map((team) => (
+                          <div key={team.id} style={{ border: "1px solid #dcfce7", background: "#f0fdf4", borderRadius: 18, padding: 14 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                              <div style={{ fontWeight: 900, fontSize: 20, color: "#166534" }}>{team.name}</div>
+                              <Pill tone="green">{typeLabel(team.matchMode)}</Pill>
+                            </div>
+                            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                              {team.players.map((p) => (
+                                <div key={p.id} style={{ background: "#fff", borderRadius: 12, padding: "8px 10px", display: "flex", justifyContent: "space-between", gap: 8 }}>
+                                  <div><b>{p.name}</b>{p.leagueBorrowedFrom ? <span style={{ color: "#c2410c", marginLeft: 6 }}>(보충:{p.leagueBorrowedFrom})</span> : null}</div>
+                                  <div style={{ color: "#475569" }}>{p.gender}/{p.grade}/{p.ageBand}</div>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{ marginTop: 10, fontWeight: 800 }}>파트너</div>
+                            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                              {team.pairs.map((pair) => (
+                                <div key={pair.id} style={{ background: "#fff", borderRadius: 12, padding: "8px 10px", display: "flex", justifyContent: "space-between", gap: 8 }}>
+                                  <div>{pair.label}</div>
+                                  <div style={{ color: "#475569" }}>{pair.players.map((p) => p.name).join(" / ")}</div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </Section>
+
+                    <Section title="정기전 팀별 순위표">
+                      <div style={{ display: "grid", gap: 16 }}>
+                        {Object.entries(leagueStandings).map(([teamName, rows]) => (
+                          <div key={teamName} style={{ overflowX: "auto" }}>
+                            <div style={{ fontWeight: 900, marginBottom: 8 }}>{teamName}</div>
+                            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+                              <thead>
+                                <tr>{["순위", "조", "선수", "경기", "승", "무", "패", "득점", "실점", "득실차", "승점"].map((h) => <th key={h} style={styles.th}>{h}</th>)}</tr>
+                              </thead>
+                              <tbody>
+                                {rows.map((row, idx) => (
+                                  <tr key={row.id}>
+                                    <td style={styles.td}><b>{idx + 1}</b></td>
+                                    <td style={styles.td}>{row.label}</td>
+                                    <td style={styles.td}>{row.players.map((p) => p.name).join(" / ")}</td>
+                                    <td style={styles.td}>{row.played}</td>
+                                    <td style={styles.td}>{row.wins}</td>
+                                    <td style={styles.td}>{row.draws}</td>
+                                    <td style={styles.td}>{row.losses}</td>
+                                    <td style={styles.td}>{row.pointsFor}</td>
+                                    <td style={styles.td}>{row.pointsAgainst}</td>
+                                    <td style={styles.td}>{row.diff}</td>
+                                    <td style={styles.td}><b>{row.leaguePoints}</b></td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ))}
+                      </div>
+                    </Section>
+                  </>
+                )}
 
                 <div ref={scheduleRef} style={{ display: "grid", gap: 16 }}>
                   {schedule.map((round) => (
-                    <div key={round.id} style={{ ...styles.sectionCard, overflow: "hidden" }}>
-                      <div style={{ background: "linear-gradient(135deg, #0f172a 0%, #334155 100%)", color: "white", padding: "14px 18px", display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                        <div style={{ fontSize: 22, fontWeight: 900 }}>ROUND {round.id}</div>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                          <div style={{ fontSize: 24 }}>🐵🐷🐯🐰</div>
-                          <Pill tone="slate">{round.matches.length} matches</Pill>
-                        </div>
+                    <div key={round.id} style={{ ...styles.card, overflow: "hidden" }}>
+                      <div style={{ background: "linear-gradient(135deg,#0f172a 0%,#334155 100%)", color: "#fff", padding: 14, display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                        <div style={{ fontSize: 20, fontWeight: 900 }}>{mode === "league" ? `${round.groupName} / ${round.internalRound}R` : `ROUND ${round.id}`}</div>
+                        <Pill tone="slate">{round.matches.length} matches</Pill>
                       </div>
-
-                      <div style={{ padding: 14, display: "grid", gap: 14, gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))" }}>
-                        {round.matches.map((match, idx) => {
-                          const titleA = mode === "rivalry" ? match.teamA[0].team : "TEAM A";
-                          const titleB = mode === "rivalry" ? match.teamB[0].team : "TEAM B";
-                          return (
-                            <div key={idx} style={{ borderRadius: 24, border: "1px solid #e2e8f0", background: "linear-gradient(180deg, #ffffff 0%, #f8fafc 100%)", padding: 14, boxShadow: "0 10px 24px rgba(15,23,42,.04)" }}>
-                              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                                <Pill tone="indigo">{match.courtId}코트</Pill>
-                                <Pill tone="slate">{match.matchLabel}</Pill>
-                              </div>
-                              <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
-                                <div style={{ borderRadius: 18, border: "1px solid #bfdbfe", background: "#eff6ff", padding: 12 }}>
-                                  <div style={{ fontSize: 12, color: "#1d4ed8", fontWeight: 800 }}>{titleA}</div>
-                                  {match.teamA.map((p) => (
-                                    <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0", fontSize: 14 }}>
-                                      <div style={{ fontWeight: 800 }}>{p.name}</div>
-                                      <div style={{ color: "#475569" }}>{p.gender}/{p.grade} ({p.score})</div>
-                                    </div>
-                                  ))}
-                                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #bfdbfe", textAlign: "right", fontWeight: 900, color: "#1d4ed8" }}>합계 {match.scoreA.toFixed(1)}</div>
-                                </div>
-
-                                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10 }}>
-                                  <div style={{ fontSize: 24, fontWeight: 950, color: "#94a3b8" }}>VS</div>
-                                  <Pill tone={Math.abs(match.diff) < 0.0001 ? "indigo" : "green"}>
-                                    {Math.abs(match.diff) < 0.0001 ? "Perfect" : `${match.diff.toFixed(1)}차`}
-                                  </Pill>
-                                </div>
-
-                                <div style={{ borderRadius: 18, border: "1px solid #fecdd3", background: "#fff1f2", padding: 12 }}>
-                                  <div style={{ fontSize: 12, color: "#be123c", fontWeight: 800 }}>{titleB}</div>
-                                  {match.teamB.map((p) => (
-                                    <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0", fontSize: 14 }}>
-                                      <div style={{ fontWeight: 800 }}>{p.name}</div>
-                                      <div style={{ color: "#475569" }}>{p.gender}/{p.grade} ({p.score})</div>
-                                    </div>
-                                  ))}
-                                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #fecdd3", textAlign: "right", fontWeight: 900, color: "#be123c" }}>합계 {match.scoreB.toFixed(1)}</div>
-                                </div>
-                              </div>
+                      <div style={{ padding: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 14 }}>
+                        {round.matches.map((m, idx) => (
+                          <div key={idx} style={{ border: "1px solid #e2e8f0", borderRadius: 18, padding: 14, background: "linear-gradient(180deg,#fff 0%,#f8fafc 100%)" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                              <Pill tone="indigo">{m.courtId}코트</Pill>
+                              <Pill tone="slate">{m.label}</Pill>
                             </div>
-                          );
-                        })}
+
+                            {mode === "league" ? (
+                              <>
+                                <div style={{ marginTop: 12, borderRadius: 16, background: "#eff6ff", border: "1px solid #bfdbfe", padding: 12 }}>
+                                  <div style={{ fontSize: 12, color: "#1d4ed8", fontWeight: 800 }}>{m.pairA.label}</div>
+                                  {m.pairA.players.map((p) => <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0" }}><div><b>{p.name}</b></div><div style={{ color: "#475569" }}>{p.gender}/{p.grade}/{p.ageBand}</div></div>)}
+                                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #bfdbfe", textAlign: "right", fontWeight: 900, color: "#1d4ed8" }}>예측합 {m.scoreA.toFixed(1)}</div>
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, margin: "10px 0" }}>
+                                  <div style={{ fontSize: 24, fontWeight: 950, color: "#94a3b8" }}>VS</div>
+                                  <Pill tone="green">{m.diff.toFixed(1)}차</Pill>
+                                </div>
+                                <div style={{ borderRadius: 16, background: "#fff1f2", border: "1px solid #fecdd3", padding: 12 }}>
+                                  <div style={{ fontSize: 12, color: "#be123c", fontWeight: 800 }}>{m.pairB.label}</div>
+                                  {m.pairB.players.map((p) => <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0" }}><div><b>{p.name}</b></div><div style={{ color: "#475569" }}>{p.gender}/{p.grade}/{p.ageBand}</div></div>)}
+                                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #fecdd3", textAlign: "right", fontWeight: 900, color: "#be123c" }}>예측합 {m.scoreB.toFixed(1)}</div>
+                                </div>
+                                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, marginTop: 12 }}>
+                                  <div>
+                                    <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>{m.pairA.label} 실제점수</div>
+                                    <input type="number" min={0} style={styles.input} value={m.result?.a ?? ""} onChange={(e) => updateLeagueScore(round.id, idx, "a", e.target.value)} />
+                                  </div>
+                                  <div>
+                                    <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6, color: "#64748b" }}>{m.pairB.label} 실제점수</div>
+                                    <input type="number" min={0} style={styles.input} value={m.result?.b ?? ""} onChange={(e) => updateLeagueScore(round.id, idx, "b", e.target.value)} />
+                                  </div>
+                                </div>
+                              </>
+                            ) : (
+                              <>
+                                <div style={{ marginTop: 12, borderRadius: 16, background: "#eff6ff", border: "1px solid #bfdbfe", padding: 12 }}>
+                                  <div style={{ fontSize: 12, color: "#1d4ed8", fontWeight: 800 }}>{mode === "rivalry" ? m.teamA[0].rivalryTeam : "TEAM A"}</div>
+                                  {m.teamA.map((p) => <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0" }}><div><b>{p.name}</b></div><div style={{ color: "#475569" }}>{p.gender}/{p.grade} ({getPlayerScore(p)})</div></div>)}
+                                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #bfdbfe", textAlign: "right", fontWeight: 900, color: "#1d4ed8" }}>합계 {m.scoreA.toFixed(1)}</div>
+                                </div>
+                                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 10, margin: "10px 0" }}>
+                                  <div style={{ fontSize: 24, fontWeight: 950, color: "#94a3b8" }}>VS</div>
+                                  <Pill tone="green">{m.diff.toFixed(1)}차</Pill>
+                                </div>
+                                <div style={{ borderRadius: 16, background: "#fff1f2", border: "1px solid #fecdd3", padding: 12 }}>
+                                  <div style={{ fontSize: 12, color: "#be123c", fontWeight: 800 }}>{mode === "rivalry" ? m.teamB[0].rivalryTeam : "TEAM B"}</div>
+                                  {m.teamB.map((p) => <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0" }}><div><b>{p.name}</b></div><div style={{ color: "#475569" }}>{p.gender}/{p.grade} ({getPlayerScore(p)})</div></div>)}
+                                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #fecdd3", textAlign: "right", fontWeight: 900, color: "#be123c" }}>합계 {m.scoreB.toFixed(1)}</div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     </div>
                   ))}
@@ -1733,5 +1285,3 @@ function App() {
     </div>
   );
 }
-
-export default App;
