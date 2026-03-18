@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 
 const styles = {
   wrap: {
@@ -45,18 +45,6 @@ const styles = {
     lineHeight: 1,
   },
 
-  saveButton: {
-    minHeight: 38,
-    padding: "0 14px",
-    borderRadius: 12,
-    border: "1px solid #1d4ed8",
-    background: "#2563eb",
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: 900,
-    cursor: "pointer",
-  },
-
   resetButton: {
     minHeight: 38,
     padding: "0 14px",
@@ -81,9 +69,9 @@ export default function ScoreInput({
   scoreBInput = "",
   onChangeScoreA,
   onChangeScoreB,
-  onSave,
   onReset,
   disabled = false,
+  compact = false,
 }) {
   const handleChangeA = (event) => {
     const nextValue = String(event.target.value || "").replace(/[^\d]/g, "");
@@ -96,41 +84,61 @@ export default function ScoreInput({
   };
 
   return (
-    <div style={styles.wrap}>
-      <div style={styles.scoreBadge}>{scoreText}</div>
+    <div style={{ ...styles.wrap, gap: compact ? 4 : styles.wrap.gap }}>
+      <div
+        style={{
+          ...styles.scoreBadge,
+          padding: compact ? "3px 8px" : styles.scoreBadge.padding,
+          fontSize: compact ? 11 : styles.scoreBadge.fontSize,
+          minHeight: compact ? 26 : styles.scoreBadge.minHeight,
+        }}
+      >
+        {scoreText}
+      </div>
 
       <input
         type="text"
         inputMode="numeric"
         value={toSafeValue(scoreAInput)}
         onChange={handleChangeA}
-        style={styles.input}
+        style={{
+          ...styles.input,
+          width: compact ? 46 : styles.input.width,
+          height: compact ? 26 : styles.input.height,
+          borderRadius: compact ? 8 : styles.input.borderRadius,
+          padding: compact ? "0 4px" : styles.input.padding,
+          fontSize: compact ? 12 : styles.input.fontSize,
+        }}
         disabled={disabled}
       />
 
-      <div style={styles.colon}>:</div>
+      <div style={{ ...styles.colon, fontSize: compact ? 13 : styles.colon.fontSize }}>:</div>
 
       <input
         type="text"
         inputMode="numeric"
         value={toSafeValue(scoreBInput)}
         onChange={handleChangeB}
-        style={styles.input}
+        style={{
+          ...styles.input,
+          width: compact ? 46 : styles.input.width,
+          height: compact ? 26 : styles.input.height,
+          borderRadius: compact ? 8 : styles.input.borderRadius,
+          padding: compact ? "0 4px" : styles.input.padding,
+          fontSize: compact ? 12 : styles.input.fontSize,
+        }}
         disabled={disabled}
       />
 
       <button
         type="button"
-        style={styles.saveButton}
-        onClick={onSave}
-        disabled={disabled}
-      >
-        저장
-      </button>
-
-      <button
-        type="button"
-        style={styles.resetButton}
+        style={{
+          ...styles.resetButton,
+          minHeight: compact ? 26 : styles.resetButton.minHeight,
+          padding: compact ? "0 7px" : styles.resetButton.padding,
+          borderRadius: compact ? 8 : styles.resetButton.borderRadius,
+          fontSize: compact ? 10 : styles.resetButton.fontSize,
+        }}
         onClick={onReset}
         disabled={disabled}
       >

@@ -17,6 +17,20 @@ function getPlayerName(player) {
   return player.name || player.playerName || player.nickname || player.fullName || "";
 }
 
+function normalizeGender(gender) {
+  const raw = String(gender || "").trim().toLowerCase();
+  if (["m", "male", "man", "남", "남자"].includes(raw)) return "M";
+  if (["f", "female", "woman", "여", "여자"].includes(raw)) return "F";
+  return "U";
+}
+
+function getReserveGroupLabel(gender) {
+  const normalized = normalizeGender(gender);
+  if (normalized === "M") return "남성 예비 선수";
+  if (normalized === "F") return "여성 예비 선수";
+  return "미분류 예비 선수";
+}
+
 function normalizeTeamDisplay(team, fallbackLabel) {
   if (!team) return { main: fallbackLabel, sub: "" };
 
@@ -26,23 +40,34 @@ function normalizeTeamDisplay(team, fallbackLabel) {
 
   const members = getTeamMembers(team).map(getPlayerName).filter(Boolean);
   const teamName = team.name || team.teamName || team.label || team.title || "";
+  const normalizedTeamName = String(teamName || "")
+    .replace(/\s+/g, " ")
+    .trim();
 
   if (members.length === 1) {
     return {
       main: members[0],
-      sub: teamName && teamName !== members[0] ? teamName : "",
+      sub: normalizedTeamName && normalizedTeamName !== members[0] ? normalizedTeamName : "",
     };
   }
 
   if (members.length >= 2) {
+    const main = members.slice(0, 2).join(" / ");
+    const sub = members.slice(2).join(" / ");
+    const shouldHideTeamName =
+      !normalizedTeamName ||
+      normalizedTeamName === main ||
+      normalizedTeamName === members.join(" / ") ||
+      normalizedTeamName === members.join(", ");
+
     return {
-      main: members.slice(0, 2).join(" / "),
-      sub: members.slice(2).join(" / ") || teamName || "",
+      main,
+      sub: sub || (shouldHideTeamName ? "" : normalizedTeamName),
     };
   }
 
-  if (teamName) {
-    return { main: teamName, sub: "" };
+  if (normalizedTeamName) {
+    return { main: normalizedTeamName, sub: "" };
   }
 
   return { main: fallbackLabel, sub: "" };
@@ -63,16 +88,16 @@ function getCourtLabel(match, index) {
     match?.courtNo;
 
   if (raw === undefined || raw === null || raw === "") {
-    return `肄뷀듃 ${index + 1}`;
+    return `코트 ${index + 1}`;
   }
 
   if (typeof raw === "number") {
-    return `肄뷀듃 ${raw}`;
+    return `코트 ${raw}`;
   }
 
   const text = String(raw).trim();
-  if (text.includes("肄뷀듃")) return text;
-  return `肄뷀듃 ${text}`;
+  if (text.includes("코트")) return text;
+  return `코트 ${text}`;
 }
 
 function getMatchType(match, modeLabel) {
@@ -84,7 +109,7 @@ function getMatchType(match, modeLabel) {
     match?.type ||
     match?.category ||
     modeLabel ||
-    "寃쎄린"
+    "경기"
   );
 }
 
@@ -221,12 +246,72 @@ function getPairLine(pair, index) {
   return `${index + 1}.`;
 }
 
+function buildReserveGroups(leagueTeams) {
+  const grouped = { M: [], F: [], U: [] };
+
+  asArray(leagueTeams).forEach((team, teamIndex) => {
+    const teamName = team?.name || `팀 ${teamIndex + 1}`;
+
+    asArray(team?.leftovers).forEach((player, playerIndex) => {
+      const name = getPlayerName(player);
+      if (!name) return;
+
+      const normalizedGender = normalizeGender(player?.gender);
+      grouped[normalizedGender] = grouped[normalizedGender] || [];
+      grouped[normalizedGender].push(`${grouped[normalizedGender].length + 1}. ${name} (${teamName})`);
+    });
+  });
+
+  return [
+    { label: getReserveGroupLabel("M"), text: grouped.M.join("\n") || "-" },
+    { label: getReserveGroupLabel("F"), text: grouped.F.join("\n") || "-" },
+    { label: getReserveGroupLabel("U"), text: grouped.U.join("\n") || "-" },
+  ];
+}
+
+function getRoundLabel(round, roundIndex) {
+  return round?.label || `ROUND ${roundIndex + 1}`;
+}
+
+function buildCourtItems(roundItems = []) {
+  const byCourt = new Map();
+
+  asArray(roundItems).forEach((round, roundIndex) => {
+    asArray(round?.matches).forEach((match, matchIndex) => {
+      const courtNo = Number(match?.court) || matchIndex + 1;
+      const courtLabel = match?.courtLabel || `코트 ${courtNo}`;
+      const teamName = String(match?.teamName || match?.homeTeamName || "").trim();
+      const entry = byCourt.get(courtNo) || {
+        id: `court-${courtNo}`,
+        courtNo,
+        courtLabel,
+        teamName,
+        items: [],
+      };
+
+      if (!entry.teamName && teamName) {
+        entry.teamName = teamName;
+      }
+
+      entry.items.push({
+        roundLabel: getRoundLabel(round, roundIndex),
+        match,
+        matchIndex,
+      });
+      byCourt.set(courtNo, entry);
+    });
+  });
+
+  return Array.from(byCourt.values()).sort((a, b) => a.courtNo - b.courtNo);
+}
+
 export async function exportScheduleWorkbook({
   modeLabel,
   players,
   targetMatchCount,
   courtCount,
   roundItems,
+  groupByCourt = false,
   leagueStandings,
   leagueSummary,
   leagueTeams = [],
@@ -247,28 +332,28 @@ export async function exportScheduleWorkbook({
   workbook.created = new Date();
   workbook.modified = new Date();
 
-  const boardSheet = workbook.addWorksheet("Round Board", {
+  const boardSheet = workbook.addWorksheet("대진표", {
     views: [{ state: "frozen", ySplit: 4 }],
     pageSetup: {
       orientation: "landscape",
       paperSize: 9,
       fitToPage: true,
       fitToWidth: 1,
-      fitToHeight: 0,
+      fitToHeight: groupByCourt ? 1 : 0,
       margins: {
-        left: 0.2,
-        right: 0.2,
-        top: 0.3,
-        bottom: 0.3,
-        header: 0.15,
-        footer: 0.15,
+        left: groupByCourt ? 0.08 : 0.2,
+        right: groupByCourt ? 0.08 : 0.2,
+        top: groupByCourt ? 0.12 : 0.3,
+        bottom: groupByCourt ? 0.12 : 0.3,
+        header: 0.08,
+        footer: 0.08,
       },
       horizontalCentered: true,
       verticalCentered: false,
     },
   });
 
-  const summarySheet = workbook.addWorksheet("Match Summary", {
+  const summarySheet = workbook.addWorksheet("경기 요약", {
     views: [{ state: "frozen", ySplit: 2 }],
     pageSetup: {
       orientation: "landscape",
@@ -286,42 +371,27 @@ export async function exportScheduleWorkbook({
     },
   });
 
-  const teamSheet =
-    Array.isArray(leagueTeams) && leagueTeams.length > 0
-      ? workbook.addWorksheet("Team Composition", {
-          pageSetup: {
-            orientation: "portrait",
-            fitToPage: true,
-            fitToWidth: 1,
-            fitToHeight: 0,
-            margins: {
-              left: 0.3,
-              right: 0.3,
-              top: 0.35,
-              bottom: 0.35,
-              header: 0.2,
-              footer: 0.2,
-            },
-          },
-        })
-      : null;
+  const teamSheet = null;
 
-  const maxBlocksPerRow = 4;
-  const blockColumnSize = 8;
+  const maxBlocksPerRow = groupByCourt ? 2 : 4;
+  const blockColumnSize = groupByCourt ? 6 : 8;
   const gapColumnSize = 1;
   const totalColumns = maxBlocksPerRow * blockColumnSize + (maxBlocksPerRow - 1) * gapColumnSize;
 
   for (let blockIndex = 0; blockIndex < maxBlocksPerRow; blockIndex += 1) {
     const startColumn = blockIndex * (blockColumnSize + gapColumnSize) + 1;
 
-    boardSheet.getColumn(startColumn).width = 9;
-    boardSheet.getColumn(startColumn + 1).width = 18;
-    boardSheet.getColumn(startColumn + 2).width = 7;
-    boardSheet.getColumn(startColumn + 3).width = 5.5;
-    boardSheet.getColumn(startColumn + 4).width = 7;
-    boardSheet.getColumn(startColumn + 5).width = 18;
-    boardSheet.getColumn(startColumn + 6).width = 1.6;
-    boardSheet.getColumn(startColumn + 7).width = 1.6;
+    boardSheet.getColumn(startColumn).width = groupByCourt ? 9 : 9;
+    boardSheet.getColumn(startColumn + 1).width = groupByCourt ? 22 : 18;
+    boardSheet.getColumn(startColumn + 2).width = groupByCourt ? 9 : 8;
+    boardSheet.getColumn(startColumn + 3).width = groupByCourt ? 4.5 : 5.5;
+    boardSheet.getColumn(startColumn + 4).width = groupByCourt ? 9 : 8;
+    boardSheet.getColumn(startColumn + 5).width = groupByCourt ? 22 : 18;
+
+    if (!groupByCourt) {
+      boardSheet.getColumn(startColumn + 6).width = 1.6;
+      boardSheet.getColumn(startColumn + 7).width = 1.6;
+    }
 
     if (blockIndex < maxBlocksPerRow - 1) {
       boardSheet.getColumn(startColumn + blockColumnSize).width = 1.8;
@@ -330,7 +400,7 @@ export async function exportScheduleWorkbook({
 
   boardSheet.mergeCells(1, 1, 1, totalColumns);
   const titleCell = boardSheet.getCell(1, 1);
-  titleCell.value = `Badminton ${modeLabel || "Schedule"} Match Board`;
+  titleCell.value = `${modeLabel || "대진표"} 대진표`;
   titleCell.font = { size: 18, bold: true, color: { argb: "0F172A" } };
   setFill(titleCell, "DBEAFE");
   applyCenter(titleCell);
@@ -339,10 +409,10 @@ export async function exportScheduleWorkbook({
 
   boardSheet.mergeCells(2, 1, 2, totalColumns);
   const subCell = boardSheet.getCell(2, 1);
-  subCell.value = `Date ${getTodayText()}   |   Players ${players.length}   |   Target matches ${Math.max(
+  subCell.value = `날짜 ${getTodayText()}   |   선수 ${players.length}명   |   목표 경기 ${Math.max(
     1,
     Number(targetMatchCount) || 1
-  )}   |   Courts ${Math.max(1, Number(courtCount) || 1)}`;
+  )}   |   코트 ${Math.max(1, Number(courtCount) || 1)}면`;
   subCell.font = { size: 10, bold: true, color: { argb: "334155" } };
   setFill(subCell, "EFF6FF");
   applyCenter(subCell);
@@ -351,7 +421,9 @@ export async function exportScheduleWorkbook({
 
   boardSheet.mergeCells(3, 1, 3, totalColumns);
   const guideCell = boardSheet.getCell(3, 1);
-  guideCell.value = `Print and score input sheet | Up to 4 courts per row | Winning score ${winningScore}`;
+  guideCell.value = groupByCourt
+    ? `출력 및 점수 기록용 시트 | 코트 1개당 A4 1장 | ROUND 2열 배치 | 승리 기준 ${winningScore}점`
+    : `출력 및 점수 기록용 시트 | 한 줄 최대 4코트 | 승리 기준 ${winningScore}점`;
   guideCell.font = { size: 9, bold: true, color: { argb: "475569" } };
   setFill(guideCell, "F8FAFC");
   applyCenter(guideCell);
@@ -360,135 +432,317 @@ export async function exportScheduleWorkbook({
 
   let currentRow = 5;
 
-  roundItems.forEach((round, roundIndex) => {
-    boardSheet.mergeCells(currentRow, 1, currentRow, totalColumns);
-    const roundCell = boardSheet.getCell(currentRow, 1);
-    roundCell.value = round?.label || `ROUND ${roundIndex + 1}`;
-    roundCell.font = { size: 15, bold: true, color: { argb: "FFFFFF" } };
-    setFill(roundCell, "2563EB");
-    applyLeft(roundCell);
-    applyCellBorder(roundCell, "1D4ED8", "medium");
-    boardSheet.getRow(currentRow).height = 24;
-    currentRow += 1;
+  const renderVerticalCourtBlock = (court, startRow, blockStart) => {
+    const blockEnd = blockStart + 5;
+    let rowCursor = startRow;
 
-    const matches = asArray(round?.matches);
+    boardSheet.mergeCells(rowCursor, blockStart, rowCursor, blockEnd);
+    const courtCell = boardSheet.getCell(rowCursor, blockStart);
+    courtCell.value = court.courtLabel;
+    courtCell.font = { size: 15, bold: true, color: { argb: "FFFFFF" } };
+    setFill(courtCell, "0F172A");
+    applyLeft(courtCell);
+    applyCellBorder(courtCell, "1E293B", "medium");
+    boardSheet.getRow(rowCursor).height = groupByCourt ? 24 : 24;
+    rowCursor += 1;
 
-    for (let startIndex = 0; startIndex < matches.length; startIndex += maxBlocksPerRow) {
-      const chunk = matches.slice(startIndex, startIndex + maxBlocksPerRow);
+    boardSheet.mergeCells(rowCursor, blockStart, rowCursor, blockEnd);
+    const courtMetaCell = boardSheet.getCell(rowCursor, blockStart);
+    courtMetaCell.value = court.teamName
+      ? `${court.teamName} 전용 코트 | 총 ${court.items.length}경기`
+      : `코트별 경기 진행 | 총 ${court.items.length}경기`;
+    courtMetaCell.font = { size: 10, bold: true, color: { argb: "334155" } };
+    setFill(courtMetaCell, "F8FAFC");
+    applyLeft(courtMetaCell);
+    applyCellBorder(courtMetaCell, "CBD5E1");
+    boardSheet.getRow(rowCursor).height = groupByCourt ? 18 : 20;
+    rowCursor += 1;
 
-      chunk.forEach((match, chunkIndex) => {
-        const blockStart = 1 + chunkIndex * (blockColumnSize + gapColumnSize);
-        const blockEnd = blockStart + 5;
+    asArray(court.items).forEach((item, itemIndex) => {
+      const match = item.match || item;
 
-        boardSheet.mergeCells(currentRow, blockStart, currentRow, blockEnd);
-        const blockTitleCell = boardSheet.getCell(currentRow, blockStart);
-        blockTitleCell.value = `${getCourtLabel(match, startIndex + chunkIndex)} 쨌 ${getMatchType(
-          match,
-          modeLabel
-        )}`;
-        blockTitleCell.font = { size: 11, bold: true, color: { argb: "0F172A" } };
-        setFill(blockTitleCell, "E0F2FE");
-        applyCenter(blockTitleCell);
-        applyCellBorder(blockTitleCell, "93C5FD", "medium");
+      boardSheet.mergeCells(rowCursor, blockStart, rowCursor, blockEnd);
+      const blockTitleCell = boardSheet.getCell(rowCursor, blockStart);
+      blockTitleCell.value = `${item.roundLabel || `ROUND ${itemIndex + 1}`} · ${getMatchType(
+        match,
+        modeLabel
+      )}`;
+      blockTitleCell.font = { size: 11, bold: true, color: { argb: "0F172A" } };
+      setFill(blockTitleCell, "E0F2FE");
+      applyCenter(blockTitleCell);
+      applyCellBorder(blockTitleCell, "93C5FD", "medium");
+      boardSheet.getRow(rowCursor).height = groupByCourt ? 22 : 22;
+      rowCursor += 1;
 
-        const headerLabels = ["Court", "TEAM A", "A Score", "VS", "B Score", "TEAM B"];
-        headerLabels.forEach((label, offset) => {
-          const cell = boardSheet.getCell(currentRow + 1, blockStart + offset);
-          cell.value = label;
-          cell.font = { size: 9, bold: true, color: { argb: "334155" } };
-          setFill(cell, "F8FAFC");
+      ["라운드", "팀 A", "A 점수", "VS", "B 점수", "팀 B"].forEach((label, offset) => {
+        const cell = boardSheet.getCell(rowCursor, blockStart + offset);
+        cell.value = label;
+        cell.font = { size: 9, bold: true, color: { argb: "334155" } };
+        setFill(cell, "F8FAFC");
+        applyCenter(cell);
+        applyCellBorder(cell, "CBD5E1");
+      });
+      boardSheet.getRow(rowCursor).height = groupByCourt ? 18 : 20;
+      rowCursor += 1;
+
+      const teamA = getTeamText(
+        match?.teamA || match?.leftTeam || match?.homeTeam || match?.team1,
+        "팀 A"
+      );
+      const teamB = getTeamText(
+        match?.teamB || match?.rightTeam || match?.awayTeam || match?.team2,
+        "팀 B"
+      );
+      const scoreA = getScoreA(match);
+      const scoreB = getScoreB(match);
+      const completed = isCompletedMatch(match, winningScore);
+      const values = [
+        item.roundLabel || `ROUND ${itemIndex + 1}`,
+        teamA,
+        scoreA,
+        "VS",
+        scoreB,
+        teamB,
+      ];
+
+      values.forEach((value, offset) => {
+        const cell = boardSheet.getCell(rowCursor, blockStart + offset);
+        cell.value = value;
+
+        if (offset === 2 || offset === 4) {
+          cell.font = {
+            size: 14,
+            bold: true,
+            color: { argb: value ? "0F172A" : "64748B" },
+          };
+          setFill(cell, completed ? "DCFCE7" : "FEF3C7");
+          applyCenter(cell);
+          applyCellBorder(cell, completed ? "22C55E" : "D6D3B1", "medium");
+        } else if (offset === 3) {
+          cell.font = { size: 12, bold: true, color: { argb: "334155" } };
+          setFill(cell, "F1F5F9");
           applyCenter(cell);
           applyCellBorder(cell, "CBD5E1");
-        });
+        } else if (offset === 1 || offset === 5) {
+          cell.font = { size: 10, bold: false, color: { argb: "0F172A" } };
+          setFill(cell, "FFFFFF");
+          applyLeft(cell);
+          applyCellBorder(cell, "CBD5E1");
+        } else {
+          cell.font = { size: 10, bold: true, color: { argb: "334155" } };
+          setFill(cell, "FFFFFF");
+          applyCenter(cell);
+          applyCellBorder(cell, "CBD5E1");
+        }
+      });
+      boardSheet.getRow(rowCursor).height = groupByCourt ? 42 : 48;
 
-        const teamA = getTeamText(
-          match?.teamA || match?.leftTeam || match?.homeTeam || match?.team1,
-          "TEAM A"
-        );
-        const teamB = getTeamText(
-          match?.teamB || match?.rightTeam || match?.awayTeam || match?.team2,
-          "TEAM B"
-        );
-        const scoreA = getScoreA(match);
-        const scoreB = getScoreB(match);
-        const completed = isCompletedMatch(match, winningScore);
+      for (let row = rowCursor - 2; row <= rowCursor; row += 1) {
+        const leftCell = boardSheet.getCell(row, blockStart);
+        const rightCell = boardSheet.getCell(row, blockEnd);
+        leftCell.border = {
+          ...leftCell.border,
+          left: { style: "medium", color: { argb: "93C5FD" } },
+        };
+        rightCell.border = {
+          ...rightCell.border,
+          right: { style: "medium", color: { argb: "93C5FD" } },
+        };
+      }
 
-        const values = [
-          getCourtLabel(match, startIndex + chunkIndex),
-          teamA,
-          scoreA,
-          "VS",
-          scoreB,
-          teamB,
-        ];
+      rowCursor += 2;
+    });
 
-        values.forEach((value, offset) => {
-          const cell = boardSheet.getCell(currentRow + 2, blockStart + offset);
-          cell.value = value;
+    return rowCursor - 1;
+  };
 
-          if (offset === 2 || offset === 4) {
-            cell.font = {
-              size: 14,
-              bold: true,
-              color: { argb: value ? "0F172A" : "64748B" },
-            };
-            setFill(cell, completed ? "DCFCE7" : "FEF3C7");
-            applyCenter(cell);
-            applyCellBorder(cell, completed ? "22C55E" : "D6D3B1", "medium");
-          } else if (offset === 3) {
-            cell.font = { size: 12, bold: true, color: { argb: "334155" } };
-            setFill(cell, "F1F5F9");
-            applyCenter(cell);
-            applyCellBorder(cell, "CBD5E1");
-          } else if (offset === 1 || offset === 5) {
-            cell.font = { size: 10, bold: false, color: { argb: "0F172A" } };
-            setFill(cell, "FFFFFF");
-            applyLeft(cell);
-            applyCellBorder(cell, "CBD5E1");
-          } else {
-            cell.font = { size: 10, bold: true, color: { argb: "334155" } };
-            setFill(cell, "FFFFFF");
-            applyCenter(cell);
-            applyCellBorder(cell, "CBD5E1");
-          }
-        });
+  const renderBoardChunk = (chunk, options = {}) => {
+    const titleKind = options.titleKind || "court";
+    const titleRenderer = options.titleRenderer;
 
-        for (let row = currentRow; row <= currentRow + 2; row += 1) {
-          const leftCell = boardSheet.getCell(row, blockStart);
-          const rightCell = boardSheet.getCell(row, blockEnd);
-          leftCell.border = {
-            ...leftCell.border,
-            left: { style: "medium", color: { argb: "93C5FD" } },
+    chunk.forEach((item, chunkIndex) => {
+      const match = item.match || item;
+      const blockStart = 1 + chunkIndex * (blockColumnSize + gapColumnSize);
+      const blockEnd = blockStart + 5;
+
+      boardSheet.mergeCells(currentRow, blockStart, currentRow, blockEnd);
+      const blockTitleCell = boardSheet.getCell(currentRow, blockStart);
+      blockTitleCell.value = titleRenderer
+        ? titleRenderer(item, chunkIndex)
+        : `${getCourtLabel(match, chunkIndex)} · ${getMatchType(match, modeLabel)}`;
+      blockTitleCell.font = { size: 11, bold: true, color: { argb: "0F172A" } };
+      setFill(blockTitleCell, "E0F2FE");
+      applyCenter(blockTitleCell);
+      applyCellBorder(blockTitleCell, "93C5FD", "medium");
+
+      const headerLabels =
+        titleKind === "round"
+          ? ["라운드", "팀 A", "A 점수", "VS", "B 점수", "팀 B"]
+          : ["코트", "팀 A", "A 점수", "VS", "B 점수", "팀 B"];
+
+      headerLabels.forEach((label, offset) => {
+        const cell = boardSheet.getCell(currentRow + 1, blockStart + offset);
+        cell.value = label;
+        cell.font = { size: 9, bold: true, color: { argb: "334155" } };
+        setFill(cell, "F8FAFC");
+        applyCenter(cell);
+        applyCellBorder(cell, "CBD5E1");
+      });
+
+      const teamA = getTeamText(
+        match?.teamA || match?.leftTeam || match?.homeTeam || match?.team1,
+        "팀 A"
+      );
+      const teamB = getTeamText(
+        match?.teamB || match?.rightTeam || match?.awayTeam || match?.team2,
+        "팀 B"
+      );
+      const scoreA = getScoreA(match);
+      const scoreB = getScoreB(match);
+      const completed = isCompletedMatch(match, winningScore);
+
+      const values = [
+        titleKind === "round"
+          ? item.roundLabel || `ROUND ${chunkIndex + 1}`
+          : getCourtLabel(match, chunkIndex),
+        teamA,
+        scoreA,
+        "VS",
+        scoreB,
+        teamB,
+      ];
+
+      values.forEach((value, offset) => {
+        const cell = boardSheet.getCell(currentRow + 2, blockStart + offset);
+        cell.value = value;
+
+        if (offset === 2 || offset === 4) {
+          cell.font = {
+            size: 14,
+            bold: true,
+            color: { argb: value ? "0F172A" : "64748B" },
           };
-          rightCell.border = {
-            ...rightCell.border,
-            right: { style: "medium", color: { argb: "93C5FD" } },
-          };
+          setFill(cell, completed ? "DCFCE7" : "FEF3C7");
+          applyCenter(cell);
+          applyCellBorder(cell, completed ? "22C55E" : "D6D3B1", "medium");
+        } else if (offset === 3) {
+          cell.font = { size: 12, bold: true, color: { argb: "334155" } };
+          setFill(cell, "F1F5F9");
+          applyCenter(cell);
+          applyCellBorder(cell, "CBD5E1");
+        } else if (offset === 1 || offset === 5) {
+          cell.font = { size: 10, bold: false, color: { argb: "0F172A" } };
+          setFill(cell, "FFFFFF");
+          applyLeft(cell);
+          applyCellBorder(cell, "CBD5E1");
+        } else {
+          cell.font = { size: 10, bold: true, color: { argb: "334155" } };
+          setFill(cell, "FFFFFF");
+          applyCenter(cell);
+          applyCellBorder(cell, "CBD5E1");
         }
       });
 
-      boardSheet.getRow(currentRow).height = 22;
-      boardSheet.getRow(currentRow + 1).height = 20;
-      boardSheet.getRow(currentRow + 2).height = 48;
-      currentRow += 4;
-    }
+      for (let row = currentRow; row <= currentRow + 2; row += 1) {
+        const leftCell = boardSheet.getCell(row, blockStart);
+        const rightCell = boardSheet.getCell(row, blockEnd);
+        leftCell.border = {
+          ...leftCell.border,
+          left: { style: "medium", color: { argb: "93C5FD" } },
+        };
+        rightCell.border = {
+          ...rightCell.border,
+          right: { style: "medium", color: { argb: "93C5FD" } },
+        };
+      }
+    });
 
-    currentRow += 1;
-  });
+    boardSheet.getRow(currentRow).height = groupByCourt ? 18 : 22;
+    boardSheet.getRow(currentRow + 1).height = groupByCourt ? 16 : 20;
+    boardSheet.getRow(currentRow + 2).height = groupByCourt ? 34 : 48;
+    currentRow += 4;
+  };
+
+  if (groupByCourt) {
+    const courtItems = buildCourtItems(roundItems);
+
+    courtItems.forEach((court, courtIndex) => {
+      boardSheet.mergeCells(currentRow, 1, currentRow, totalColumns);
+      const courtCell = boardSheet.getCell(currentRow, 1);
+      courtCell.value = court.courtLabel;
+      courtCell.font = { size: 15, bold: true, color: { argb: "FFFFFF" } };
+      setFill(courtCell, "0F172A");
+      applyLeft(courtCell);
+      applyCellBorder(courtCell, "1E293B", "medium");
+      boardSheet.getRow(currentRow).height = 24;
+      currentRow += 1;
+
+      boardSheet.mergeCells(currentRow, 1, currentRow, totalColumns);
+      const courtMetaCell = boardSheet.getCell(currentRow, 1);
+      courtMetaCell.value = court.teamName
+        ? `${court.teamName} 전용 코트 | 총 ${court.items.length}경기`
+        : `코트별 경기 진행 | 총 ${court.items.length}경기`;
+      courtMetaCell.font = { size: 10, bold: true, color: { argb: "334155" } };
+      setFill(courtMetaCell, "F8FAFC");
+      applyLeft(courtMetaCell);
+      applyCellBorder(courtMetaCell, "CBD5E1");
+      boardSheet.getRow(currentRow).height = 18;
+      currentRow += 1;
+
+      for (let startIndex = 0; startIndex < court.items.length; startIndex += maxBlocksPerRow) {
+        const chunk = court.items.slice(startIndex, startIndex + maxBlocksPerRow);
+        renderBoardChunk(chunk, {
+          titleKind: "round",
+          titleRenderer: (item) => `${item.roundLabel} · ${getMatchType(item.match, modeLabel)}`,
+        });
+      }
+
+      currentRow += 1;
+      const pageBreakRow = boardSheet.getRow(currentRow - 1);
+      if (courtIndex + 1 < courtItems.length && typeof pageBreakRow.addPageBreak === "function") {
+        pageBreakRow.addPageBreak();
+      }
+    });
+  } else {
+    roundItems.forEach((round, roundIndex) => {
+      boardSheet.mergeCells(currentRow, 1, currentRow, totalColumns);
+      const roundCell = boardSheet.getCell(currentRow, 1);
+      roundCell.value = round?.label || `ROUND ${roundIndex + 1}`;
+      roundCell.font = { size: 15, bold: true, color: { argb: "FFFFFF" } };
+      setFill(roundCell, "2563EB");
+      applyLeft(roundCell);
+      applyCellBorder(roundCell, "1D4ED8", "medium");
+      boardSheet.getRow(currentRow).height = 24;
+      currentRow += 1;
+
+      const matches = asArray(round?.matches);
+
+      for (let startIndex = 0; startIndex < matches.length; startIndex += maxBlocksPerRow) {
+        const chunk = matches.slice(startIndex, startIndex + maxBlocksPerRow);
+        renderBoardChunk(chunk, {
+          titleKind: "court",
+          titleRenderer: (match, chunkIndex) =>
+            `${getCourtLabel(match, startIndex + chunkIndex)} · ${getMatchType(match, modeLabel)}`,
+        });
+      }
+
+      currentRow += 1;
+    });
+  }
 
   const boardLastColumnLetter = getExcelColumnLetter(totalColumns);
   setPrintArea(boardSheet, currentRow - 1, boardLastColumnLetter);
 
   summarySheet.columns = [
-    { header: "ROUND", key: "round", width: 12 },
-    { header: "肄뷀듃", key: "court", width: 11 },
-    { header: "寃쎄린醫낅쪟", key: "type", width: 14 },
-    { header: "TEAM A", key: "teamA", width: 28 },
-    { header: "A Score", key: "scoreA", width: 9 },
+    { header: "코트", key: "court", width: 11 },
+    { header: "순번", key: "order", width: 9 },
+    { header: "경기 종류", key: "type", width: 12 },
+    { header: "팀 A", key: "teamA", width: 28 },
+    { header: "A 점수", key: "scoreA", width: 9 },
     { header: "VS", key: "vs", width: 7 },
-    { header: "B Score", key: "scoreB", width: 9 },
-    { header: "TEAM B", key: "teamB", width: 28 },
-    { header: "Status", key: "status", width: 11 },
+    { header: "B 점수", key: "scoreB", width: 9 },
+    { header: "팀 B", key: "teamB", width: 28 },
+    { header: "비고", key: "note", width: 22 },
   ];
 
   const summaryHeaderRow = summarySheet.getRow(1);
@@ -500,29 +754,61 @@ export async function exportScheduleWorkbook({
     applyCellBorder(cell, "1D4ED8");
   });
 
-  roundItems.forEach((round, roundIndex) => {
-    asArray(round?.matches).forEach((match, matchIndex) => {
+  const summaryCourtItems = buildCourtItems(roundItems);
+  summaryCourtItems.forEach((court) => {
+    const headerRow = summarySheet.addRow({
+      court: court.courtLabel,
+      order: "",
+      type: court.teamName ? `${court.teamName} 전용` : "코트별 경기",
+      teamA: "",
+      scoreA: "",
+      vs: "",
+      scoreB: "",
+      teamB: "",
+      note: "",
+    });
+    headerRow.height = 22;
+    headerRow.eachCell((cell) => {
+      cell.font = { size: 10, bold: true, color: { argb: "0F172A" } };
+      setFill(cell, "E0F2FE");
+      applyCellBorder(cell, "93C5FD");
+      applyCenter(cell);
+    });
+
+    asArray(court.items).forEach((item, index) => {
+      const match = item.match || item;
       const scoreA = getScoreA(match);
       const scoreB = getScoreB(match);
-      const completed = isCompletedMatch(match, winningScore);
 
       summarySheet.addRow({
-        round: round?.label || `ROUND ${roundIndex + 1}`,
-        court: getCourtLabel(match, matchIndex),
+        court: court.courtLabel,
+        order: index + 1,
         type: getMatchType(match, modeLabel),
         teamA: getTeamText(
           match?.teamA || match?.leftTeam || match?.homeTeam || match?.team1,
-          "TEAM A"
+          "팀 A"
         ),
         scoreA,
         vs: "VS",
         scoreB,
         teamB: getTeamText(
           match?.teamB || match?.rightTeam || match?.awayTeam || match?.team2,
-          "TEAM B"
+          "팀 B"
         ),
-        status: completed ? "Completed" : "Pending",
+        note: "",
       });
+    });
+
+    summarySheet.addRow({
+      court: "",
+      order: "",
+      type: "",
+      teamA: "",
+      scoreA: "",
+      vs: "",
+      scoreB: "",
+      teamB: "",
+      note: "",
     });
   });
 
@@ -534,7 +820,7 @@ export async function exportScheduleWorkbook({
       cell.font = { size: 10, color: { argb: "0F172A" } };
       applyCellBorder(cell, "CBD5E1");
 
-      if (colNumber === 4 || colNumber === 8) {
+      if (colNumber === 4 || colNumber === 8 || colNumber === 9) {
         applyLeft(cell);
       } else {
         applyCenter(cell);
@@ -542,8 +828,8 @@ export async function exportScheduleWorkbook({
 
       if (colNumber === 5 || colNumber === 7) {
         cell.font = { size: 11, bold: true, color: { argb: "0F172A" } };
-        setFill(cell, cell.value ? "DCFCE7" : "FEF3C7");
-        applyCellBorder(cell, cell.value ? "22C55E" : "D6D3B1", "medium");
+        setFill(cell, cell.value ? "FEF3C7" : "FFF8DB");
+        applyCellBorder(cell, "D6D3B1", "medium");
       }
 
       if (colNumber === 6) {
@@ -551,15 +837,6 @@ export async function exportScheduleWorkbook({
         setFill(cell, "F1F5F9");
       }
     });
-
-    const statusCell = row.getCell(9);
-    if (statusCell.value === "Completed") {
-      setFill(statusCell, "DCFCE7");
-      statusCell.font = { size: 10, bold: true, color: { argb: "166534" } };
-    } else {
-      setFill(statusCell, "F1F5F9");
-      statusCell.font = { size: 10, bold: true, color: { argb: "475569" } };
-    }
   });
 
   summarySheet.autoFilter = {
@@ -574,7 +851,7 @@ export async function exportScheduleWorkbook({
     summaryLastColumnLetter
   );
 
-  if (teamSheet) {
+  if (false && teamSheet) {
     teamSheet.columns = [
       { header: "label", key: "label", width: 16 },
       { header: "contentA", key: "contentA", width: 22 },
@@ -583,7 +860,7 @@ export async function exportScheduleWorkbook({
 
     teamSheet.mergeCells(1, 1, 1, 3);
     const teamTitleCell = teamSheet.getCell(1, 1);
-    teamTitleCell.value = `Team Composition | Winning score ${winningScore}`;
+    teamTitleCell.value = `팀 구성표 | 승리 기준 ${winningScore}점`;
     teamTitleCell.font = { size: 16, bold: true, color: { argb: "0F172A" } };
     setFill(teamTitleCell, "DBEAFE");
     applyLeft(teamTitleCell);
@@ -592,7 +869,7 @@ export async function exportScheduleWorkbook({
 
     teamSheet.mergeCells(2, 1, 2, 3);
     const guideCell = teamSheet.getCell(2, 1);
-    guideCell.value = "Each team is split into pair lineup, full roster, and reserves.";
+    guideCell.value = "각 팀의 조 편성과 전체 선수 명단을 정리했습니다.";
     guideCell.font = { size: 10, bold: true, color: { argb: "475569" } };
     setFill(guideCell, "F8FAFC");
     applyLeft(guideCell);
@@ -613,13 +890,6 @@ export async function exportScheduleWorkbook({
           .filter(Boolean)
           .map((name, index) => `${index + 1}. ${name}`)
           .join("\n") || "-";
-      const reserveText =
-        asArray(team?.leftovers)
-          .map(getPlayerName)
-          .filter(Boolean)
-          .map((name, index) => `${index + 1}. ${name}`)
-          .join("\n") || "-";
-
       teamSheet.mergeCells(teamRowCursor, 1, teamRowCursor, 3);
       const teamHeaderCell = teamSheet.getCell(teamRowCursor, 1);
       teamHeaderCell.value = `${teamName}${ageBand ? ` (${ageBand})` : ""}`;
@@ -633,7 +903,6 @@ export async function exportScheduleWorkbook({
       const sections = [
         { label: "조 편성", text: pairText },
         { label: "전체 선수", text: playerText },
-        { label: "예비 선수", text: reserveText },
       ];
 
       sections.forEach((section) => {
@@ -666,6 +935,42 @@ export async function exportScheduleWorkbook({
       teamRowCursor += 1;
     });
 
+    const reserveGroups = buildReserveGroups(leagueTeams);
+    const hasReservePlayers = reserveGroups.some((group) => group.text !== "-");
+
+    if (hasReservePlayers) {
+      teamSheet.mergeCells(teamRowCursor, 1, teamRowCursor, 3);
+      const reserveHeaderCell = teamSheet.getCell(teamRowCursor, 1);
+      reserveHeaderCell.value = "공통 예비 선수";
+      reserveHeaderCell.font = { size: 12, bold: true, color: { argb: "DC2626" } };
+      setFill(reserveHeaderCell, "FEF2F2");
+      applyLeft(reserveHeaderCell);
+      applyCellBorder(reserveHeaderCell, "FCA5A5", "medium");
+      teamSheet.getRow(teamRowCursor).height = 22;
+      teamRowCursor += 1;
+
+      reserveGroups.forEach((group) => {
+        const labelCell = teamSheet.getCell(teamRowCursor, 1);
+        labelCell.value = group.label;
+        labelCell.font = { size: 10, bold: true, color: { argb: "334155" } };
+        setFill(labelCell, "FFF1F2");
+        applyCenter(labelCell);
+        applyCellBorder(labelCell, "FBCFE8");
+
+        teamSheet.mergeCells(teamRowCursor, 2, teamRowCursor, 3);
+        const contentCell = teamSheet.getCell(teamRowCursor, 2);
+        contentCell.value = group.text;
+        contentCell.font = { size: 10, color: { argb: "0F172A" } };
+        setFill(contentCell, "FFFFFF");
+        applyLeft(contentCell);
+        applyCellBorder(contentCell, "CBD5E1");
+
+        const lineCount = String(group.text).split("\n").length;
+        teamSheet.getRow(teamRowCursor).height = Math.min(100, Math.max(22, 16 + lineCount * 10));
+        teamRowCursor += 1;
+      });
+    }
+
     const teamLastColumnLetter = getExcelColumnLetter(3);
     setPrintArea(
       teamSheet,
@@ -674,8 +979,8 @@ export async function exportScheduleWorkbook({
     );
   }
 
-  if (Array.isArray(leagueStandings) && leagueStandings.length > 0) {
-    const standingsSheet = workbook.addWorksheet("League Standings", {
+  if (false && Array.isArray(leagueStandings) && leagueStandings.length > 0) {
+    const standingsSheet = workbook.addWorksheet("정기전 순위", {
       pageSetup: {
         orientation: "landscape",
         fitToPage: true,
@@ -685,14 +990,14 @@ export async function exportScheduleWorkbook({
     });
 
     standingsSheet.columns = [
-      { header: "Rank", key: "rank", width: 10 },
-      { header: "Team", key: "teamName", width: 20 },
-      { header: "Played", key: "played", width: 10 },
-      { header: "Win", key: "win", width: 10 },
-      { header: "Lose", key: "lose", width: 10 },
-      { header: "Point", key: "point", width: 12 },
-      { header: "Against", key: "against", width: 12 },
-      { header: "Diff", key: "diff", width: 12 },
+      { header: "순위", key: "rank", width: 10 },
+      { header: "팀", key: "teamName", width: 20 },
+      { header: "경기 수", key: "played", width: 10 },
+      { header: "승", key: "win", width: 10 },
+      { header: "패", key: "lose", width: 10 },
+      { header: "득점", key: "point", width: 12 },
+      { header: "실점", key: "against", width: 12 },
+      { header: "득실", key: "diff", width: 12 },
     ];
 
     const headerRow = standingsSheet.getRow(1);
